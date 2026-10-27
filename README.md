@@ -1,6 +1,6 @@
 # DevOps
 
-Azure DevOps in your terminal. Review pull requests, watch pipeline logs, and run commands from scripts or agents.
+Azure DevOps in your terminal. Review pull requests, watch pipeline logs, and run commands from scripts.
 
 For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps Server. Supports YAML pipelines, pull requests, and empty remote repository creation. No work items or classic pipelines.
 
@@ -9,7 +9,7 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.2.0
+mise use -g github:DominicWrege/devops-cli@0.2.1
 devops tui
 ```
 

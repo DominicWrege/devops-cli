@@ -12,7 +12,7 @@ on:
         description: Published version to install, without the v prefix
         type: string
         required: true
-        default: "0.2.0"
+        default: "0.2.1"
 
 permissions:
   contents: read

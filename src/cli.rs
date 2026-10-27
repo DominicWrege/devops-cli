@@ -1,11 +1,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
-#[command(
-    name = "devops",
-    version,
-    about = "Azure DevOps. Text-only CLI for agents; use tui for human interaction."
-)]
+#[command(name = "devops", version, about = "Azure DevOps in your terminal.")]
 pub struct Cli {
     #[arg(
         long,
@@ -25,7 +21,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Launch the human interface and setup wizard
+    /// Launch the interactive interface and setup wizard
     Tui,
     /// Save explicit defaults without prompting or signing in
     Init {
