@@ -31,8 +31,8 @@ The Azure DevOps SDK is deprecated upstream. Small request policies repair missi
 Set `package.version` in `Cargo.toml`, update `Cargo.lock`, commit, and push a matching tag:
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 `.github/workflows/release.yml` validates the tag, tests and builds on each native platform, packages the binaries, verifies SHA-256 checksums, and publishes a GitHub release. The publishing job alone has write permission. Each archive includes the WAM attribution notice. A final job installs the published release through mise on each platform.

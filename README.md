@@ -13,7 +13,7 @@ mise use -g github:DominicWrege/devops-cli@latest
 devops tui
 ```
 
-Use `@0.1.0` instead of `@latest` to pin the version. You can also download an archive from [Releases](https://github.com/DominicWrege/devops-cli/releases).
+Use `@0.2.0` instead of `@latest` to pin the version. You can also download an archive from [Releases](https://github.com/DominicWrege/devops-cli/releases).
 
 - Windows x64.
 - Linux/WSL x64 with glibc 2.35 or newer.
