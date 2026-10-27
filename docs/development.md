@@ -13,7 +13,7 @@ Use a native Windows build on Windows and a Linux build inside WSL. macOS is use
 
 Release targets are Windows x64 MSVC and Linux x64 musl only. ARM64 release builds have been removed.
 
-For the static Linux build, install `musl-tools` and the Rust `x86_64-unknown-linux-musl` target. CI explicitly enables `crt-static` and uses `musl-gcc` as the linker. It checks the ELF for an interpreter and shared-library dependencies, then runs the binary in Alpine. Ordinary CI also checks this musl build before a tag is pushed.
+For the static Linux build, install `musl-tools` and the Rust `x86_64-unknown-linux-musl` target. CI explicitly enables `crt-static`, compiles C dependencies with `musl-gcc`, and links the executable with Rust's bundled LLD. Ubuntu's `musl-gcc` wrapper is not used for the final static-PIE link. The shared setup action checks a small executable's startup before building the application. CI checks the finished ELF for an interpreter and shared-library dependencies, then runs the binary in Alpine. Ordinary CI also checks this musl build before a tag is pushed.
 
 ## Checks
 

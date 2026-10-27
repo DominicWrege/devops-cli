@@ -1,0 +1,25 @@
+name: Set up static musl builds
+description: Compile C dependencies with musl-gcc and link Rust with its bundled LLD.
+runs:
+  using: composite
+  steps:
+    - name: Install musl headers and compiler
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install --yes musl-tools
+    - name: Configure the linker and check static startup
+      shell: bash
+      run: |
+        host=$(rustc -vV | sed -n 's/^host: //p')
+        linker="$(rustc --print sysroot)/lib/rustlib/$host/bin/rust-lld"
+        test -x "$linker"
+        echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=$linker" >> "$GITHUB_ENV"
+        echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
+        # Ubuntu's musl-gcc wrapper can break Rust's static-PIE startup.
+        # Use LLD for the final link, not the GCC wrapper.
+        printf 'fn main() { println!("Static musl startup works"); }\n' > "$RUNNER_TEMP/musl-startup.rs"
+        rustc --target x86_64-unknown-linux-musl \
+          -C "linker=$linker" -C target-feature=+crt-static \
+          "$RUNNER_TEMP/musl-startup.rs" -o "$RUNNER_TEMP/musl-startup"
+        "$RUNNER_TEMP/musl-startup"
