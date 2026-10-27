@@ -9,11 +9,11 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@latest
+mise use -g github:DominicWrege/devops-cli@0.2.0
 devops tui
 ```
 
-Use `@0.2.0` instead of `@latest` to pin the version. You can also download an archive from [Releases](https://github.com/DominicWrege/devops-cli/releases).
+Pin the version. `@latest` ignores releases less than 24 hours old, so it can report no versions just after a release. You can also download an archive from [Releases](https://github.com/DominicWrege/devops-cli/releases).
 
 - Windows x64.
 - Linux/WSL x64, a static musl binary with no glibc requirement.
