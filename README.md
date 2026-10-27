@@ -1,73 +1,76 @@
 # DevOps
 
-Rust Azure DevOps Services client. Agents use a non-interactive, text-only CLI. Humans use `devops tui`.
+Azure DevOps in your terminal. Review pull requests, watch pipeline logs, and run commands from scripts or agents.
 
-This is an initial implementation. Live Windows WAM, WSL login, and Azure DevOps tenant acceptance tests are still required. The binary name is provisional.
+For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps Server. Supports YAML pipelines, pull requests, and empty remote repository creation. No work items or classic pipelines.
 
-## Install with mise
+## Install
 
-Once a tagged GitHub release is published, install with [mise](https://mise.jdx.dev/):
+Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
 mise use -g github:DominicWrege/devops-cli@latest
 devops tui
 ```
 
-To pin a release, use `@0.1.0` instead of `@latest`. Private repository installs require GitHub credentials available to mise. No custom mise plugin, Rust compiler, Python runtime, or Azure CLI is needed to use the prebuilt binary.
+Use `@0.1.0` instead of `@latest` to pin the version. You can also download an archive from [Releases](https://github.com/DominicWrege/devops-cli/releases).
 
-Release archives support Windows x64 and Linux/WSL x64 and ARM64. Linux x64 requires glibc 2.35 or newer, ARM64 requires glibc 2.39 or newer. Alpine/musl and macOS release builds are not provided. Windows and WSL must install separately. Each archive includes the WAM attribution notice and a SHA-256 checksum file is published alongside it.
+- Windows x64.
+- Linux/WSL x64 with glibc 2.35 or newer.
+- Linux/WSL ARM64 with glibc 2.39 or newer.
 
-### Publish a release
+Install separately on Windows and inside WSL. No macOS or Alpine/musl release is available. Azure CLI is not required.
 
-Push the project to GitHub first. Set `package.version` in `Cargo.toml`, update `Cargo.lock`, then push a matching tag:
+## Sign in
 
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-```
+Run `devops tui`. The first launch opens setup; press `s` to reopen it later.
 
-`.github/workflows/release.yml` checks the tag against the manifest, tests and builds on each native platform, packages the binaries, verifies checksums, then publishes a GitHub release. It uses the repository's `GITHUB_TOKEN`, with write permission only in the publishing job. It then smoke-tests installation with mise on each platform. Tags such as `v0.2.0-rc.1` become prereleases, installable with `mise use -g 'github:DominicWrege/devops-cli[prerelease=true]@0.2.0-rc.1'`.
+1. Enter your Entra tenant ID and your own public-client app ID.
+2. Complete sign-in. Windows uses your Windows account through WAM. Linux/WSL shows a device code and a URL to open.
+3. Choose an organization and default project.
 
-If publication fails after creating the draft, inspect that draft before retrying. The workflow does not overwrite an existing release or its assets. CI builds and install smoke tests do not verify live Entra sign-in. See [the acceptance checklist](docs/acceptance.md).
+Ask your tenant administrator for an app registration with Azure DevOps delegated `user_impersonation` permission and the required consent. Enable public-client flows for device-code login. Windows also needs the broker redirect URI `ms-appx-web://Microsoft.AAD.BrokerPlugin/CLIENT_ID`, with your app ID in place of `CLIENT_ID`. Tenant policy may block device-code login.
 
-## Build and run
-
-Requires Rust 1.88 or newer and a native build toolchain.
-
-```sh
-cargo build --locked --release
-cargo run -- tui
-```
-
-Use a native Windows build on Windows and a Linux build inside WSL. The macOS build is used for development, not a tested release target.
-
-## Sign in and choose defaults
-
-Open `devops tui`, then press `s` to configure your tenant UUID and your own Entra public-client application UUID. The first launch opens this form automatically. There is no bundled application ID and no Azure CLI dependency.
-
-Your registration needs Azure DevOps delegated `user_impersonation` permission and any consent your tenant requires. Enable public-client flows for Linux device-code login. Windows broker sign-in also needs WAM-compatible registration, including the broker redirect URI `ms-appx-web://Microsoft.AAD.BrokerPlugin/CLIENT_ID`. Verify this configuration with your tenant administrator. Tenant policy may prohibit device codes or require another human sign-in.
-
-Windows uses native WAM, first trying the existing Windows account silently. Only the TUI can open broker UI. Linux/WSL displays a device code in the TUI and caches the resulting session for silent renewal.
-
-After sign-in, select an accessible organization, then a default project. Configuration lives in:
-
-- `~/.config/devops/settings.json`, organization/project and app identity, never tokens.
-- Linux/WSL `~/.config/devops/auth.json`, an unencrypted session cache. Directory permissions are `0700`, file permissions `0600`. Refresh operations use a file lock and atomic replacement. Same-user processes and root can read these credentials.
-- Windows `~/.config/devops/wam-account.json`, selected account metadata only. WAM owns token persistence.
-
-On Windows, `~` is `%USERPROFILE%`, not AppData. Windows and WSL have separate settings and sessions. Nothing automatically shares them.
-
-An explicit-argument setup command saves defaults without signing in or prompting:
+Check your session without opening sign-in UI:
 
 ```sh
-devops init --org my-org --project my-project --tenant-id TENANT_UUID --client-id APP_UUID
-devops config
 devops auth status
 ```
 
-Normal `--org` and `--project` flags override defaults for one command only. They never save or infer a target from Git remotes.
+Tokens renew silently when your session and tenant policy allow it. If a command exits with code `3`, open `devops tui` and sign in again. Windows and WSL keep separate sessions.
 
-## CLI
+This is an early release. Live Windows/WSL sign-in and tenant workflows still need validation.
+
+## Use the TUI
+
+```sh
+devops tui
+```
+
+| Key | Action |
+| --- | --- |
+| `p` | Pull requests |
+| `i` | Assigned reviews needing attention |
+| `l` | YAML pipelines |
+| `s` | Sign-in and setup |
+| `q` | Quit |
+| Arrow keys, Enter | Select and open an item |
+| `F5` | Refresh lists and details |
+| `Esc` | Close a form or return home |
+
+In PR details, use `e` to edit, `c` to comment, `v` to vote, `m` to merge, `a` to abandon, or `r` to reactivate. Press `n` in the PR list or details to create a PR. Merge and abandon ask for confirmation.
+
+Forms use Tab to move between fields, Ctrl+U to clear a field, and Enter to submit.
+
+For pipelines, choose a pipeline and then a run. Tasks appear on the left; the selected task's logs appear on the right. Arrow keys change selection and pause following. PageUp/PageDown scroll logs. Press `f` to resume following within the selected job.
+
+The pipeline TUI only observes runs. Use the CLI to trigger, retry, cancel, or register pipelines.
+
+## Use the CLI
+
+Commands never prompt or open sign-in UI. Output is plain text with tab-separated tables; there is no JSON mode.
+
+### Pull requests
 
 ```sh
 devops pr list
@@ -80,9 +83,17 @@ devops pr review 123 --vote approve
 devops pr merge 123 --strategy squash --yes
 devops pr abandon 123 --yes
 devops pr reactivate 123
+```
 
-devops repo create new-repo
+`pr status` lists active, non-draft PRs assigned directly to you with a review vote of zero or below.
 
+Reviewer flags take Azure DevOps identity UUIDs, not email addresses or Entra object IDs. Repeat `--reviewer` when creating a PR to add several reviewers. Use `--remove-reviewer` when editing to remove one.
+
+Votes are `approve`, `approve-with-suggestions`, `reset`, `wait`, and `reject`. Merge respects branch policies; it does not bypass them or delete the source branch.
+
+### Pipelines
+
+```sh
 devops pipeline list
 devops pipeline view 12
 devops pipeline runs 12
@@ -96,51 +107,56 @@ devops pipeline cancel 456 --yes
 devops pipeline register --name CI --repo my-repo --yaml /azure-pipelines.yml
 ```
 
-`--reviewer`, `--add-reviewer`, and `--remove-reviewer` use Azure DevOps identity UUIDs, not Entra object IDs or email addresses. Create accepts repeatable `--reviewer`. Review votes are `approve`, `approve-with-suggestions`, `reset`, `wait`, and `reject`.
+Here `12` is a pipeline ID and `456` is a run ID. Registration points to YAML already committed in the repository; it does not create a YAML file.
 
-Only merge, abandon, and cancel need `--yes`. Trigger, rerun, and retry can deploy through YAML and do not require extra acknowledgement, as selected in the plan. Azure DevOps permissions and policies always apply. Merge sends the observed source commit and never requests policy bypass or source-branch deletion.
+Repeat `--param NAME=VALUE` for parameters. Values can be booleans, numbers, arrays, objects, or strings. `--variable NAME=VALUE` sets non-secret variables only. Never put secrets on the command line.
 
-Repository creation makes an empty remote Git repository. It does not create commits or alter local Git state. Pipeline registration references existing committed YAML; it does not generate YAML.
+`rerun` starts a full new run with the previous run's parameters, non-secret variables, and pinned repository versions. It does not preserve skipped-stage choices and refuses secret overrides or non-repository resource inputs. `retry` asks the server to retry eligible failed work; you cannot select individual jobs.
 
-Parameters accept repeatable `NAME=VALUE`. Valid typed literals become booleans, numbers, arrays, or objects; other values become strings. Variables are non-secret overrides only. Do not put secrets on the command line. Keep secrets in protected Azure DevOps variables or secret stores. The server decides which overrides are permitted.
+`pipeline logs` returns up to 2,000 lines per call. Increase `--start` for the next page, or use the TUI for continuous logs. `pipeline runs` lists recent runs, not a complete history.
 
-CLI tables have a header and tab-separated columns. Details use labeled text. Output goes to stdout, errors to stderr. No JSON output, prompts, automatic browser launch, or implicit TUI launch. Control characters from remote content are stripped. No automatic write retries are enabled. If a connection fails during a write, inspect the resource before repeating it. Multi-request PR reviewer edits can partly succeed.
+### Repositories
 
-Exit codes:
+```sh
+devops repo create new-repo
+```
 
-| Code | Meaning |
+Creates an empty remote repository and prints its URL. No local Git changes or initial commit.
+
+### Defaults and overrides
+
+```sh
+devops config
+devops pr list --org another-org --project another-project
+```
+
+`--org` and `--project` override saved defaults for one command. They do not save changes or infer a target from Git remotes.
+
+To save defaults without signing in or prompting:
+
+```sh
+devops init --org my-org --project my-project --tenant-id TENANT_UUID --client-id APP_UUID
+```
+
+Settings live in `~/.config/devops/settings.json`. On Windows that is `%USERPROFILE%\.config\devops\settings.json`, not AppData.
+
+Linux/WSL stores an unencrypted session in `~/.config/devops/auth.json`, readable by your user and root. The directory is `0700` and the file is `0600`. Do not share this file. Windows stores account metadata in `wam-account.json`; WAM manages the credentials. `settings.json` never contains tokens.
+
+### Writes and errors
+
+Merge, abandon, and cancel require `--yes`. Trigger, rerun, and retry do not, even if the pipeline can deploy.
+
+Writes are not retried automatically. If a request fails or is interrupted, check the resource before repeating it. A PR edit that changes several reviewers can partly succeed.
+
+| Exit code | Meaning |
 | --- | --- |
-| 0 | Success |
-| 1 | Network, service, file, or other operation failure |
-| 2 | Invalid arguments, missing context/configuration, or missing acknowledgement |
-| 3 | Human sign-in required |
-| 4 | Permission/policy denial reported as HTTP 403 |
-| 5 | Watched run finished unsuccessfully, including cancellation |
+| `0` | Success |
+| `1` | Network, service, or file error |
+| `2` | Invalid arguments, missing settings, or missing `--yes` |
+| `3` | Sign-in required |
+| `4` | Permission or policy denied with HTTP 403 |
+| `5` | Watched run failed or was canceled |
 
-## TUI
+Use `devops --help` or `devops pr --help` for command options.
 
-Home keys are `p` for PRs, `i` for assigned reviews needing attention, `l` for YAML pipelines, `s` for setup, and `q` to quit. In the PR list, `i` toggles the assigned-review filter. Attention means a non-draft active PR assigned directly to your identity with a review vote of zero or below. `Esc` returns home. Lists use arrow keys and Enter. `F5` refreshes lists/details. Forms use Tab to select fields, Ctrl+U to clear a field, Enter to submit, and Esc to cancel.
-
-PR details expose create, edit, comment, review, merge, abandon, and reactivate. Merge and abandon require a separate `y` confirmation.
-
-The pipeline screen is observation-only. Choose a pipeline, then a run:
-
-- Left sidebar shows stages, jobs, and tasks with status text.
-- Main pane shows the selected task's logs, polled every two seconds.
-- Following stays within the selected job. Up/Down changes selection and pauses following. PageUp/PageDown scrolls logs and also pauses it. Press `f` to resume.
-- Each log fetch reads at most 2,000 lines. The view retains at most 10,000 lines or 2 MiB and truncates single lines over 64 KiB. The title shows the first retained line offset.
-- Network work does not block input. Failures preserve the last view and retry on the next poll. Terminal state is restored on normal exit and errors.
-
-## Current limits and verification
-
-- YAML pipelines only, no classic builds/releases or work items.
-- `pipeline runs` shows the service's recent run list, currently up to 10,000 runs. It is not an unlimited historical export.
-- `pipeline logs` returns one page of up to 2,000 lines. Use `--start` for the next page. The TUI advances offsets automatically.
-- `rerun` creates a new full run using the prior returned template parameters, non-secret variables, and pinned repository versions. It does not reproduce a prior stage-skip selection. It refuses secret overrides and non-repository resource inputs rather than silently losing them.
-- `retry` calls the SDK's build update with `retry=true`. Eligible failed work depends on the server. Job-level selection is not implemented or promised; tenant behavior still needs validation.
-- Organization discovery requires a provisioned Azure DevOps profile and accessible organizations. Setup selects existing organizations/projects; it does not create them.
-- The selected SDK is deprecated upstream. Request policies repair missing YAML-registration fields, PR draft/expected-head fields, sparse build updates, and leading doubled URL slashes. Requests still use `azure_devops_rust_api`.
-
-Run `cargo test --locked` and `cargo clippy --locked --all-targets -- -D warnings`. The reviewed code passes 53 Rust tests on macOS, plus two release-packaging tests. The earlier 45-test suite also passed on Linux ARM64 with Rust 1.88. Automated tests use local mock HTTP servers, not a real tenant. The Windows authentication/settings modules also pass cross-target checking; native Windows execution remains untested. CI definitions cover native Windows/Linux and the Rust 1.88 minimum. Run the [manual acceptance checklist](docs/acceptance.md) on Windows and WSL before using this against important resources.
-
-The application and tests deny Rust `unwrap`/`expect` panic calls. Application lints also reject explicit panic/placeholders and undocumented unsafe blocks. Unsafe code is denied everywhere except the native Windows WAM module, whose five Windows interop calls have safety comments. These rules apply to this project's code, not its dependencies. See [the review record](docs/code-review.md).
+[Development and releases](docs/development.md) · [Acceptance checklist](docs/acceptance.md)
