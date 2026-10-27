@@ -108,7 +108,7 @@ jobs:
 
           \`mise use -g github:$GH_REPO@$VERSION\`
 
-          Start setup with \`devops tui\`. You need your own Entra tenant and public-client app IDs.
+          Start setup with \`devops login\`. It discovers the tenant from the organization; you only need your own Entra public-client app ID.
           Linux uses a static musl binary, with no glibc requirement. ARM64 and macOS builds are not provided.
           Live tenant authentication acceptance is still required. See the README and docs/acceptance.md.
           EOF
