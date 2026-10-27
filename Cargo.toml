@@ -1,0 +1,38 @@
+[package]
+name = "devops"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Azure DevOps CLI for agents and TUI for humans"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+azure_core = { version = "1.1", default-features = false, features = ["reqwest", "tokio", "reqwest_rustls"] }
+azure_identity = { version = "1", default-features = false, features = ["tokio"] }
+azure_devops_rust_api = { version = "0.39.1", default-features = false, features = ["git", "build", "pipelines", "core", "accounts", "profile", "policy"] }
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+dirs = "6"
+fs2 = "0.4"
+oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
+ratatui = "0.29"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+time = "0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+uuid = "1"
+base64 = "0.22"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+percent-encoding = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Foundation", "Foundation_Collections", "Security_Authentication_Web_Core", "Security_Credentials", "Win32_Foundation", "Win32_System_Com", "Win32_System_WinRT", "Win32_UI_WindowsAndMessaging", "Win32_System_Console"] }
+windows-future = "0.3"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+wiremock = "0.6"

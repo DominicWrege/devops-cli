@@ -1,0 +1,1367 @@
+use crate::{
+    auth,
+    cli::*,
+    config::Target,
+    error,
+    output::{self, rows, scalar, text},
+};
+use anyhow::{Context, Result, ensure};
+use azure_core::http::{
+    Context as HttpContext, RawResponse, Request, RetryOptions,
+    policies::{Policy, PolicyResult},
+};
+use azure_devops_rust_api::{self as ado, git::models as git};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use serde_json::{Value, json};
+use std::sync::Arc;
+
+// SDK request builders own URLs, authentication, transport and API versions.
+// Reading their raw response also preserves fields omitted by generated models.
+macro_rules! call {
+    ($request:expr) => {{
+        let response = send($request.send()).await?.into_raw_response();
+        decode(response)
+    }};
+}
+
+async fn send<T>(future: impl std::future::Future<Output = azure_core::Result<T>>) -> Result<T> {
+    tokio::time::timeout(std::time::Duration::from_secs(60), future).await
+        .map_err(|_| anyhow::anyhow!("Azure DevOps request timed out. A write may have reached the server; inspect the resource before repeating it."))?
+        .map_err(error::sdk)
+}
+
+fn decode(response: RawResponse) -> Result<Value> {
+    let body = response.into_body();
+    if body.as_ref().is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(body.as_ref())
+        .map_err(|_| anyhow::anyhow!("Azure DevOps returned an invalid response"))
+}
+
+pub fn segment(value: &str) -> String {
+    utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
+}
+pub fn branch(value: &str) -> String {
+    if value.starts_with("refs/") {
+        value.into()
+    } else {
+        format!("refs/heads/{value}")
+    }
+}
+
+// The SDK omits YAML path/repository in CreatePipelineConfigurationParameters.
+// This per-call policy repairs that payload while retaining the SDK operation.
+// It also allows a sparse build PATCH instead of resending read-only Build fields.
+struct SdkBody(Value);
+impl std::fmt::Debug for SdkBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SdkBody { .. }")
+    }
+}
+#[async_trait::async_trait]
+impl Policy for SdkBody {
+    async fn send(
+        &self,
+        ctx: &HttpContext,
+        request: &mut Request,
+        next: &[Arc<dyn Policy>],
+    ) -> PolicyResult {
+        request.set_body(azure_core::json::to_json(&self.0)?);
+        next_policy(ctx, request, next).await
+    }
+}
+
+#[derive(Debug)]
+struct SdkPath;
+#[async_trait::async_trait]
+impl Policy for SdkPath {
+    async fn send(
+        &self,
+        ctx: &HttpContext,
+        request: &mut Request,
+        next: &[Arc<dyn Policy>],
+    ) -> PolicyResult {
+        // Url displays a root endpoint with a trailing slash; the generated SDK
+        // adds another slash when joining the organization/API path.
+        let path = format!("/{}", request.url().path().trim_start_matches('/'));
+        request.url_mut().set_path(&path);
+        next_policy(ctx, request, next).await
+    }
+}
+async fn next_policy(
+    ctx: &HttpContext<'_>,
+    request: &mut Request,
+    next: &[Arc<dyn Policy>],
+) -> PolicyResult {
+    let (policy, remaining) = next.split_first().ok_or_else(|| {
+        azure_core::Error::with_message(
+            azure_core::error::ErrorKind::Other,
+            "SDK policy chain has no transport",
+        )
+    })?;
+    policy.send(ctx, request, remaining).await
+}
+fn policies(body: Option<Value>) -> Vec<Arc<dyn Policy>> {
+    let mut result: Vec<Arc<dyn Policy>> = vec![Arc::new(SdkPath)];
+    if let Some(body) = body {
+        result.push(Arc::new(SdkBody(body)));
+    }
+    result
+}
+
+#[derive(Clone)]
+pub struct Service {
+    credential: ado::Credential,
+    endpoint: azure_core::http::Url,
+    profile_endpoint: azure_core::http::Url,
+    pub target: Target,
+}
+
+impl Service {
+    pub fn new(credential: Arc<auth::Credential>, target: Target) -> Result<Self> {
+        Ok(Self {
+            credential: ado::Credential::from_token_credential(credential),
+            endpoint: "https://dev.azure.com".parse()?,
+            profile_endpoint: "https://app.vssps.visualstudio.com".parse()?,
+            target,
+        })
+    }
+    fn git(&self) -> ado::git::Client {
+        self.git_body(None)
+    }
+    fn git_body(&self, body: Option<Value>) -> ado::git::Client {
+        ado::git::ClientBuilder::new(self.credential.clone())
+            .endpoint(self.endpoint.clone())
+            .retry(RetryOptions::none())
+            .per_call_policies(policies(body))
+            .build()
+    }
+    fn pipelines(&self, body: Option<Value>) -> ado::pipelines::Client {
+        ado::pipelines::ClientBuilder::new(self.credential.clone())
+            .endpoint(self.endpoint.clone())
+            .retry(RetryOptions::none())
+            .per_call_policies(policies(body))
+            .build()
+    }
+    fn build(&self, body: Option<Value>) -> ado::build::Client {
+        ado::build::ClientBuilder::new(self.credential.clone())
+            .endpoint(self.endpoint.clone())
+            .retry(RetryOptions::none())
+            .per_call_policies(policies(body))
+            .build()
+    }
+    fn org(&self) -> &str {
+        &self.target.organization
+    }
+    fn project(&self) -> String {
+        segment(&self.target.project)
+    }
+
+    pub async fn profile(&self) -> Result<Value> {
+        call!(
+            ado::profile::ClientBuilder::new(self.credential.clone())
+                .endpoint(self.profile_endpoint.clone())
+                .retry(RetryOptions::none())
+                .per_call_policies(policies(None))
+                .build()
+                .profiles_client()
+                .get("me")
+        )
+    }
+    pub async fn organizations(&self) -> Result<Vec<Value>> {
+        let profile = self.profile().await?;
+        let id = text(&profile, "id");
+        ensure!(!id.is_empty(), "Azure DevOps profile has no ID");
+        Ok(rows(&call!(
+            ado::accounts::ClientBuilder::new(self.credential.clone())
+                .endpoint(self.profile_endpoint.clone())
+                .retry(RetryOptions::none())
+                .per_call_policies(policies(None))
+                .build()
+                .accounts_client()
+                .list()
+                .member_id(id)
+        )?))
+    }
+    pub async fn projects(&self) -> Result<Vec<Value>> {
+        let client = ado::core::ClientBuilder::new(self.credential.clone())
+            .endpoint(self.endpoint.clone())
+            .retry(RetryOptions::none())
+            .per_call_policies(policies(None))
+            .build();
+        let mut all = Vec::new();
+        let mut token: Option<String> = None;
+        loop {
+            let mut request = client.projects_client().list(self.org()).top(100);
+            if let Some(token) = token.as_ref() {
+                request = request.continuation_token(
+                    token
+                        .parse()
+                        .context("Invalid project continuation token")?,
+                );
+            }
+            let response = send(request.send()).await?.into_raw_response();
+            let next = continuation(&response);
+            all.extend(rows(&decode(response)?));
+            if next.is_none() || next == token {
+                break;
+            }
+            token = next;
+        }
+        Ok(all)
+    }
+    pub async fn repo_create(&self, name: &str) -> Result<Value> {
+        repository(name)?;
+        call!(self.git().repositories_client().create(
+            self.org(),
+            git::GitRepositoryCreateOptions {
+                name: Some(name.into()),
+                ..Default::default()
+            },
+            self.project()
+        ))
+    }
+    pub async fn pr_list(
+        &self,
+        state: PrState,
+        repo: Option<&str>,
+        reviewer: Option<&str>,
+        author: Option<&str>,
+    ) -> Result<Vec<Value>> {
+        let mut result = Vec::new();
+        let mut skip = 0;
+        loop {
+            let mut request = self
+                .git()
+                .pull_requests_client()
+                .get_pull_requests_by_project(self.org(), self.project())
+                .search_criteria_status(serde_json::from_value::<git::PullRequestStatus>(json!(
+                    state.api()
+                ))?)
+                .top(100)
+                .skip(skip);
+            if let Some(repo) = repo {
+                request = request.search_criteria_repository_id(repo);
+            }
+            if let Some(reviewer) = reviewer {
+                request = request.search_criteria_reviewer_id(reviewer);
+            }
+            if let Some(author) = author {
+                request = request.search_criteria_creator_id(author);
+            }
+            let page = rows(&call!(request)?);
+            let count = page.len();
+            result.extend(page);
+            if count < 100 {
+                break;
+            }
+            skip += 100;
+        }
+        Ok(result)
+    }
+    pub async fn pr(&self, id: i32) -> Result<Value> {
+        positive(id)?;
+        call!(self.git().pull_requests_client().get_pull_request_by_id(
+            self.org(),
+            id,
+            self.project()
+        ))
+    }
+    fn repo_id(pr: &Value) -> Result<String> {
+        pr["repository"]["id"]
+            .as_str()
+            .map(segment)
+            .context("PR response has no repository ID")
+    }
+    pub async fn attention_prs(&self) -> Result<Vec<Value>> {
+        let me = self.profile().await?;
+        let me = text(&me, "id");
+        ensure!(!me.is_empty(), "Profile has no ID");
+        Ok(self
+            .pr_list(PrState::Active, None, Some(me), None)
+            .await?
+            .into_iter()
+            .filter(|pr| {
+                pr["isDraft"] != true
+                    && rows(&pr["reviewers"]).iter().any(|r| {
+                        text(r, "id").eq_ignore_ascii_case(me)
+                            && r["vote"].as_i64().unwrap_or(0) <= 0
+                    })
+            })
+            .collect())
+    }
+    pub async fn pr_detail(&self, id: i32) -> Result<String> {
+        let (_, detail) = self.pr_details(id).await?;
+        Ok(detail)
+    }
+    pub async fn pr_details(&self, id: i32) -> Result<(Value, String)> {
+        let pr = self.pr(id).await?;
+        let repo = Self::repo_id(&pr)?;
+        let threads = call!(self.git().pull_request_threads_client().list(
+            self.org(),
+            &repo,
+            id,
+            self.project()
+        ))?;
+        let statuses = call!(self.git().pull_request_statuses_client().list(
+            self.org(),
+            &repo,
+            id,
+            self.project()
+        ))?;
+        let project_id = pr["repository"]["project"]["id"]
+            .as_str()
+            .context("PR response has no project ID")?;
+        let artifact = format!("vstfs:///CodeReview/CodeReviewId/{project_id}/{id}");
+        let policies = call!(
+            ado::policy::ClientBuilder::new(self.credential.clone())
+                .endpoint(self.endpoint.clone())
+                .retry(RetryOptions::none())
+                .per_call_policies(policies(None))
+                .build()
+                .evaluations_client()
+                .list(self.org(), self.project(), artifact)
+        )?;
+        let mut out = format!(
+            "PR {id}\nTitle: {}\nState: {}\nDraft: {}\n{} -> {}\n{}\n\n{}\n\nReviewers\n",
+            text(&pr, "title"),
+            text(&pr, "status"),
+            scalar(&pr["isDraft"]),
+            text(&pr, "sourceRefName"),
+            text(&pr, "targetRefName"),
+            text(&pr, "remoteUrl"),
+            text(&pr, "description")
+        );
+        for r in rows(&pr["reviewers"]) {
+            out.push_str(&format!(
+                "{}\t{}\n",
+                text(&r, "displayName"),
+                scalar(&r["vote"])
+            ));
+        }
+        out.push_str("\nChecks\n");
+        for s in rows(&statuses) {
+            out.push_str(&format!(
+                "{}\t{}\n",
+                text(&s["context"], "name"),
+                text(&s, "state")
+            ));
+        }
+        out.push_str("\nPolicies\n");
+        for p in rows(&policies) {
+            out.push_str(&format!(
+                "{}\t{}\n",
+                text(&p["configuration"]["type"], "displayName"),
+                text(&p, "status")
+            ));
+        }
+        out.push_str("\nDiscussion\n");
+        for thread in rows(&threads) {
+            out.push_str(&format!("Thread {}\n", scalar(&thread["id"])));
+            for comment in rows(&thread["comments"]) {
+                if comment["isDeleted"].as_bool() != Some(true) {
+                    out.push_str(&format!(
+                        "{}: {}\n",
+                        text(&comment["author"], "displayName"),
+                        text(&comment, "content")
+                    ));
+                }
+            }
+        }
+        Ok((pr, output::clean(&out)))
+    }
+    pub async fn pr_action(&self, command: &PrCommand) -> Result<String> {
+        command.validate()?;
+        match command {
+            PrCommand::List {
+                state,
+                repo,
+                reviewer,
+                author,
+            } => Ok(pr_table(
+                &self
+                    .pr_list(
+                        *state,
+                        repo.as_deref(),
+                        reviewer.as_deref(),
+                        author.as_deref(),
+                    )
+                    .await?,
+            )),
+            PrCommand::Status => Ok(pr_table(&self.attention_prs().await?)),
+            PrCommand::View { id } => self.pr_detail(*id).await,
+            PrCommand::Create(args) => {
+                let mut body = git::GitPullRequestCreateOptions::new(
+                    branch(&args.source),
+                    branch(&args.target),
+                    args.title.clone(),
+                );
+                body.description = Some(args.description.clone());
+                body.is_draft = Some(args.draft);
+                body.reviewers = args
+                    .reviewer
+                    .iter()
+                    .map(|id| git::IdentityId::new(id.clone()))
+                    .collect();
+                let pr = call!(self.git().pull_requests_client().create(
+                    self.org(),
+                    segment(&args.repo),
+                    self.project(),
+                    body
+                ))?;
+                Ok(pr_result(&pr))
+            }
+            PrCommand::Edit(args) => {
+                let pr = self.pr(args.id).await?;
+                let repo = Self::repo_id(&pr)?;
+                let body = git::GitPullRequestUpdateOptions {
+                    title: args.title.clone(),
+                    description: args.description.clone(),
+                    ..Default::default()
+                };
+                if args.title.is_some() || args.description.is_some() || args.draft.is_some() {
+                    let mut payload = serde_json::to_value(&body)?;
+                    if let Some(draft) = args.draft {
+                        payload["isDraft"] = json!(draft);
+                    }
+                    call!(self.git_body(Some(payload)).pull_requests_client().update(
+                        self.org(),
+                        &repo,
+                        self.project(),
+                        args.id,
+                        body
+                    ))?;
+                }
+                // Do not retry a partially completed multi-request edit automatically.
+                for id in &args.add_reviewer {
+                    call!(
+                        self.git()
+                            .pull_request_reviewers_client()
+                            .create_pull_request_reviewers(
+                                self.org(),
+                                vec![git::IdentityRef::new(id.clone())],
+                                &repo,
+                                args.id,
+                                self.project()
+                            )
+                    )?;
+                }
+                for id in &args.remove_reviewer {
+                    call!(self.git().pull_request_reviewers_client().delete(
+                        self.org(),
+                        &repo,
+                        args.id,
+                        segment(id),
+                        self.project()
+                    ))?;
+                }
+                Ok(format!("Updated PR {}", args.id))
+            }
+            PrCommand::Comment { id, body } => {
+                let pr = self.pr(*id).await?;
+                let thread: git::GitPullRequestCommentThread = serde_json::from_value(
+                    json!({"comments":[{"parentCommentId":0,"content":body,"commentType":"text"}],"status":"active"}),
+                )?;
+                call!(self.git().pull_request_threads_client().create(
+                    self.org(),
+                    thread,
+                    Self::repo_id(&pr)?,
+                    *id,
+                    self.project()
+                ))?;
+                Ok(format!("Commented on PR {id}"))
+            }
+            PrCommand::Review { id, vote } => {
+                let pr = self.pr(*id).await?;
+                let me = self.profile().await?;
+                let id_me = text(&me, "id");
+                ensure!(!id_me.is_empty(), "Profile has no ID");
+                let reviewer: git::IdentityRefWithVote =
+                    serde_json::from_value(json!({"id": id_me, "vote":vote.number()}))?;
+                call!(
+                    self.git()
+                        .pull_request_reviewers_client()
+                        .create_pull_request_reviewer(
+                            self.org(),
+                            reviewer,
+                            Self::repo_id(&pr)?,
+                            *id,
+                            segment(id_me),
+                            self.project()
+                        )
+                )?;
+                Ok(format!("Recorded review for PR {id}"))
+            }
+            PrCommand::Merge { id, strategy, .. } => {
+                let pr = self.pr(*id).await?;
+                ensure!(pr["status"] == "active", "Only active PRs can be completed");
+                let commit = pr["lastMergeSourceCommit"]["commitId"]
+                    .as_str()
+                    .context("Cannot merge without the latest source commit")?;
+                let payload = json!({"status":"completed", "lastMergeSourceCommit":{"commitId":commit}, "completionOptions":{"mergeStrategy":strategy.api(),"bypassPolicy":false,"deleteSourceBranch":false,"transitionWorkItems":false}});
+                let body: git::GitPullRequestUpdateOptions =
+                    serde_json::from_value(payload.clone())?;
+                let response = call!(self.git_body(Some(payload)).pull_requests_client().update(
+                    self.org(),
+                    Self::repo_id(&pr)?,
+                    self.project(),
+                    *id,
+                    body
+                ))?;
+                Ok(format!(
+                    "Completion requested for PR {id}\nState: {}\nMerge status: {}",
+                    text(&response, "status"),
+                    text(&response, "mergeStatus")
+                ))
+            }
+            PrCommand::Abandon { id, .. } | PrCommand::Reactivate { id } => {
+                let pr = self.pr(*id).await?;
+                let state = if matches!(command, PrCommand::Abandon { .. }) {
+                    "abandoned"
+                } else {
+                    "active"
+                };
+                let body = serde_json::from_value::<git::GitPullRequestUpdateOptions>(
+                    json!({"status":state}),
+                )?;
+                call!(self.git().pull_requests_client().update(
+                    self.org(),
+                    Self::repo_id(&pr)?,
+                    self.project(),
+                    *id,
+                    body
+                ))?;
+                Ok(format!("PR {id}: {state}"))
+            }
+        }
+    }
+
+    pub async fn pipeline_list(&self) -> Result<Vec<Value>> {
+        let mut all = Vec::new();
+        let mut token = None;
+        loop {
+            let mut request = self
+                .pipelines(None)
+                .pipelines_client()
+                .list(self.org(), self.project())
+                .top(100);
+            if let Some(t) = token.as_ref() {
+                request = request.continuation_token(t);
+            }
+            let response = send(request.send()).await?.into_raw_response();
+            let next = continuation(&response);
+            // The pipeline API can include designer pipelines. Verify configuration before exposing them.
+            for item in rows(&decode(response)?) {
+                let detail = self.pipeline(response_id(&item, "id")?).await?;
+                if detail["configuration"]["type"] == "yaml" {
+                    all.push(detail);
+                }
+            }
+            if next.is_none() || next == token {
+                break;
+            }
+            token = next;
+        }
+        Ok(all)
+    }
+    pub async fn pipeline(&self, id: i32) -> Result<Value> {
+        positive(id)?;
+        call!(
+            self.pipelines(None)
+                .pipelines_client()
+                .get(self.org(), self.project(), id)
+        )
+    }
+    pub async fn require_yaml(&self, id: i32) -> Result<Value> {
+        let pipeline = self.pipeline(id).await?;
+        ensure!(
+            pipeline["configuration"]["type"] == "yaml",
+            "Only YAML pipelines are supported"
+        );
+        Ok(pipeline)
+    }
+    pub async fn runs(&self, id: i32) -> Result<Vec<Value>> {
+        self.require_yaml(id).await?;
+        Ok(rows(&call!(self.pipelines(None).runs_client().list(
+            self.org(),
+            self.project(),
+            id
+        ))?))
+    }
+    pub async fn build_run(&self, id: i32) -> Result<Value> {
+        positive(id)?;
+        let run = call!(
+            self.build(None)
+                .builds_client()
+                .get(self.org(), self.project(), id)
+        )?;
+        let pipeline_id = response_id(&run["definition"], "id")?;
+        self.require_yaml(pipeline_id).await?;
+        Ok(run)
+    }
+    pub async fn timeline(&self, run: i32) -> Result<Vec<Value>> {
+        // An empty timeline ID intentionally selects the build's current timeline.
+        let result = send(
+            self.build(None)
+                .timeline_client()
+                .get(self.org(), self.project(), run, "")
+                .send(),
+        )
+        .await;
+        match result {
+            Ok(response) => Ok(rows(&decode(response.into_raw_response())?["records"])),
+            // Queued runs may not have a timeline yet. The caller verifies the run exists.
+            Err(error)
+                if error
+                    .downcast_ref::<error::HttpFailure>()
+                    .is_some_and(|e| e.0 == 404) =>
+            {
+                Ok(Vec::new())
+            }
+            Err(error) => Err(error),
+        }
+    }
+    pub async fn log(&self, run: i32, log: i32, start: u64) -> Result<Vec<String>> {
+        positive(run)?;
+        positive(log)?;
+        ensure!(start <= i64::MAX as u64 - 1999, "Log offset too large");
+        let response = send(
+            self.build(None)
+                .builds_client()
+                .get_build_log(self.org(), self.project(), run, log)
+                .start_line(start as i64)
+                .end_line(start as i64 + 1999)
+                .send(),
+        )
+        .await?
+        .into_raw_response();
+        let body = response.into_body();
+        // Some service versions return a JSON list; others return plain text.
+        if let Ok(value) = serde_json::from_slice::<Value>(body.as_ref())
+            && (value.is_array() || value["value"].is_array())
+        {
+            return Ok(rows(&value)
+                .iter()
+                .map(|v| output::clean(v.as_str().unwrap_or("")))
+                .collect());
+        }
+        let body = std::str::from_utf8(body.as_ref()).context("Invalid log encoding")?;
+        Ok(body.lines().map(output::clean).collect())
+    }
+    pub async fn pipeline_action(&self, command: &PipelineCommand) -> Result<String> {
+        command.validate()?;
+        match command {
+            PipelineCommand::List => Ok(output::table(
+                &self.pipeline_list().await?,
+                &[("ID", "id"), ("NAME", "name"), ("FOLDER", "folder")],
+            )),
+            PipelineCommand::View { id } => {
+                let p = self.require_yaml(*id).await?;
+                Ok(format!(
+                    "Pipeline {id}\nName: {}\nFolder: {}\nYAML: {}\nRepository: {}",
+                    text(&p, "name"),
+                    text(&p, "folder"),
+                    text(&p["configuration"], "path"),
+                    text(&p["configuration"]["repository"], "id")
+                ))
+            }
+            PipelineCommand::Runs { id } => Ok(run_table(&self.runs(*id).await?)),
+            PipelineCommand::Inspect { run } => {
+                let build = self.build_run(*run).await?;
+                let timeline = self.timeline(*run).await?;
+                Ok(format!(
+                    "{}\n\n{}",
+                    build_summary(&build),
+                    output::table(
+                        &timeline,
+                        &[
+                            ("ID", "id"),
+                            ("PARENT", "parentId"),
+                            ("TYPE", "type"),
+                            ("NAME", "name"),
+                            ("STATE", "state"),
+                            ("RESULT", "result"),
+                            ("PERCENT", "percentComplete")
+                        ]
+                    )
+                ))
+            }
+            PipelineCommand::Logs { run, log, start } => {
+                self.build_run(*run).await?;
+                Ok(self.log(*run, *log, *start).await?.join("\n"))
+            }
+            PipelineCommand::Run {
+                id,
+                branch: reference,
+                param,
+                variable,
+            } => {
+                self.require_yaml(*id).await?;
+                let mut body = ado::pipelines::models::RunPipelineParameters {
+                    template_parameters: Some(Value::Object(pairs(param, true)?)),
+                    ..Default::default()
+                };
+                let vars = pairs(variable, false)?;
+                body.variables = Some(Value::Object(
+                    vars.into_iter()
+                        .map(|(k, v)| (k, json!({"value":v,"isSecret":false})))
+                        .collect(),
+                ));
+                if let Some(reference) = reference {
+                    body.resources = Some(serde_json::from_value(
+                        json!({"repositories":{"self":{"refName":branch(reference)}}}),
+                    )?);
+                }
+                let run = call!(self.pipelines(None).runs_client().run_pipeline(
+                    self.org(),
+                    body,
+                    self.project(),
+                    *id
+                ))?;
+                Ok(run_summary(&run))
+            }
+            PipelineCommand::Cancel { run, .. } => {
+                self.build_run(*run).await?;
+                self.patch_build(*run, false, json!({"status":"cancelling"}))
+                    .await?;
+                Ok(format!("Cancellation requested for run {run}"))
+            }
+            PipelineCommand::Retry { run } => {
+                let build = self.build_run(*run).await?;
+                ensure!(
+                    build["status"] == "completed",
+                    "Only completed runs can be retried"
+                );
+                self.patch_build(*run, true, json!({"status":"inProgress"}))
+                    .await?;
+                Ok(format!(
+                    "Retry requested for run {run}. The server chooses eligible failed work."
+                ))
+            }
+            PipelineCommand::Rerun { id, run } => {
+                self.require_yaml(*id).await?;
+                let previous = call!(self.pipelines(None).runs_client().get(
+                    self.org(),
+                    self.project(),
+                    *id,
+                    *run
+                ))?;
+                ensure!(
+                    previous["pipeline"]["id"] == *id,
+                    "Run does not belong to this pipeline"
+                );
+                let variables = previous["variables"]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+                ensure!(
+                    !variables.values().any(|v| v["isSecret"] == true),
+                    "Cannot safely copy secret run overrides. Trigger an explicit new run instead."
+                );
+                let mut body = ado::pipelines::models::RunPipelineParameters {
+                    template_parameters: previous.get("templateParameters").cloned(),
+                    variables: Some(Value::Object(variables)),
+                    ..Default::default()
+                };
+                // Reuse references and pinned commits, never repository bearer tokens.
+                if let Some(resources) = previous["resources"]["repositories"].as_object() {
+                    let repositories: serde_json::Map<String, Value> = resources
+                        .iter()
+                        .map(|(k, v)| {
+                            (
+                                k.clone(),
+                                json!({"refName":v["refName"],"version":v["version"]}),
+                            )
+                        })
+                        .collect();
+                    body.resources = Some(serde_json::from_value(
+                        json!({"repositories":repositories}),
+                    )?);
+                }
+                ensure!(
+                    previous["resources"].as_object().is_none_or(|r| r
+                        .iter()
+                        .all(|(k, v)| k == "repositories"
+                            || v.is_null()
+                            || v.as_object().is_some_and(|o| o.is_empty()))),
+                    "Rerun of external resources requires an explicit run. Inputs will not be silently lost."
+                );
+                let new_run = call!(self.pipelines(None).runs_client().run_pipeline(
+                    self.org(),
+                    body,
+                    self.project(),
+                    *id
+                ))?;
+                Ok(run_summary(&new_run))
+            }
+            PipelineCommand::Register { name, repo, yaml } => {
+                ensure!(
+                    !name.trim().is_empty() && !yaml.trim().is_empty(),
+                    "Pipeline name and committed YAML path are required"
+                );
+                let repository = call!(self.git().repositories_client().get_repository(
+                    self.org(),
+                    segment(repo),
+                    self.project()
+                ))?;
+                let payload = json!({"name":name,"configuration":{"type":"yaml","path":yaml,"repository":{"id":repository["id"],"type":"azureReposGit"}}});
+                let body = ado::pipelines::models::CreatePipelineParameters {
+                    name: Some(name.clone()),
+                    configuration: Some(serde_json::from_value(json!({"type":"yaml"}))?),
+                    ..Default::default()
+                };
+                let pipeline = call!(self.pipelines(Some(payload)).pipelines_client().create(
+                    self.org(),
+                    body,
+                    self.project()
+                ))?;
+                Ok(format!(
+                    "Registered pipeline {}\n{}",
+                    scalar(&pipeline["id"]),
+                    text(&pipeline, "name")
+                ))
+            }
+            PipelineCommand::Watch { .. } => {
+                anyhow::bail!("Watch is handled by the command runner")
+            }
+        }
+    }
+    async fn patch_build(&self, id: i32, retry: bool, payload: Value) -> Result<Value> {
+        let body: ado::build::models::Build = serde_json::from_value(
+            json!({"id":id,"definition":{"id":0,"project":{"name":"","visibility":"private"},"queueStatus":"enabled","revision":0,"url":""},"project":{"name":"","visibility":"private"},"priority":"normal","reason":"manual"}),
+        )?;
+        call!(
+            self.build(Some(payload))
+                .builds_client()
+                .update_build(self.org(), body, self.project(), id)
+                .retry(retry)
+        )
+    }
+}
+
+fn continuation(response: &RawResponse) -> Option<String> {
+    response
+        .headers()
+        .get_optional_string(&"x-ms-continuationtoken".into())
+        .filter(|s| !s.is_empty())
+}
+pub fn response_id(value: &Value, key: &str) -> Result<i32> {
+    value[key]
+        .as_i64()
+        .and_then(|id| i32::try_from(id).ok())
+        .filter(|id| *id > 0)
+        .with_context(|| format!("Azure DevOps response has no valid {key}"))
+}
+fn pairs(input: &[String], typed: bool) -> Result<serde_json::Map<String, Value>> {
+    let mut map = serde_json::Map::new();
+    for pair in input {
+        let (key, value) = pair
+            .split_once('=')
+            .ok_or_else(|| error::invalid("Expected NAME=VALUE"))?;
+        ensure!(
+            !key.is_empty() && !key.chars().any(char::is_control),
+            "Invalid parameter or variable name"
+        );
+        let value = if typed {
+            serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.into()))
+        } else {
+            Value::String(value.into())
+        };
+        ensure!(
+            map.insert(key.into(), value).is_none(),
+            "Duplicate parameter or variable name"
+        );
+    }
+    Ok(map)
+}
+pub fn pr_table(items: &[Value]) -> String {
+    output::table(
+        items,
+        &[
+            ("ID", "pullRequestId"),
+            ("STATE", "status"),
+            ("DRAFT", "isDraft"),
+            ("TITLE", "title"),
+            ("SOURCE", "sourceRefName"),
+            ("TARGET", "targetRefName"),
+        ],
+    )
+}
+fn pr_result(pr: &Value) -> String {
+    format!(
+        "PR {}\n{}",
+        scalar(&pr["pullRequestId"]),
+        text(pr, "remoteUrl")
+    )
+}
+pub fn run_table(items: &[Value]) -> String {
+    output::table(
+        items,
+        &[
+            ("ID", "id"),
+            ("NAME", "name"),
+            ("STATE", "state"),
+            ("RESULT", "result"),
+            ("CREATED", "createdDate"),
+        ],
+    )
+}
+pub fn run_summary(run: &Value) -> String {
+    format!(
+        "Run {}\nState: {}\nResult: {}",
+        scalar(&run["id"]),
+        text(run, "state"),
+        text(run, "result")
+    )
+}
+pub fn build_summary(run: &Value) -> String {
+    format!(
+        "Run {}\nPipeline: {}\nBranch: {}\nStatus: {}\nResult: {}",
+        scalar(&run["id"]),
+        text(&run["definition"], "name"),
+        text(run, "sourceBranch"),
+        text(run, "status"),
+        text(run, "result")
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, header, method, path, query_param},
+    };
+
+    #[derive(Debug)]
+    struct TestCredential;
+    #[async_trait::async_trait]
+    impl azure_core::credentials::TokenCredential for TestCredential {
+        async fn get_token(
+            &self,
+            scopes: &[&str],
+            _: Option<azure_core::credentials::TokenRequestOptions<'_>>,
+        ) -> azure_core::Result<azure_core::credentials::AccessToken> {
+            assert_eq!(scopes, [auth::SCOPE]);
+            Ok(azure_core::credentials::AccessToken::new(
+                "fixture-access-token",
+                time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+            ))
+        }
+    }
+    fn api(server: &MockServer) -> Result<Service> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let endpoint: azure_core::http::Url = server.uri().parse()?;
+        Ok(Service {
+            credential: ado::Credential::from_token_credential(Arc::new(TestCredential)),
+            endpoint: endpoint.clone(),
+            profile_endpoint: endpoint,
+            target: Target {
+                organization: "org".into(),
+                project: "project".into(),
+            },
+        })
+    }
+    async fn mock_get(server: &MockServer, url: &str, value: Value) {
+        Mock::given(method("GET"))
+            .and(path(url))
+            .respond_with(ResponseTemplate::new(200).set_body_json(value))
+            .mount(server)
+            .await;
+    }
+    fn pr_fixture() -> Value {
+        json!({"pullRequestId":7,"status":"active","repository":{"id":"repo","project":{"id":"project-id"}},"lastMergeSourceCommit":{"commitId":"expected-head"}})
+    }
+    async fn mock_run(server: &MockServer) {
+        mock_get(
+            server,
+            "/org/project/_apis/build/builds/9",
+            json!({"id":9,"status":"completed","definition":{"id":2}}),
+        )
+        .await;
+        mock_get(
+            server,
+            "/org/project/_apis/pipelines/2",
+            json!({"id":2,"configuration":{"type":"yaml"}}),
+        )
+        .await;
+    }
+    #[tokio::test]
+    async fn creates_only_an_empty_repository() -> Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/org/project/_apis/git/repositories")).and(header("authorization","Bearer fixture-access-token"))
+            .and(body_json(json!({"name":"demo"}))).respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"repo","name":"demo","remoteUrl":"https://dev.azure.com/org/project/_git/demo"}))).expect(1).mount(&server).await;
+        assert_eq!(api(&server)?.repo_create("demo").await?["name"], "demo");
+        Ok(())
+    }
+    #[tokio::test]
+    async fn acknowledgement_fails_before_any_requests() -> Result<()> {
+        let server = MockServer::start().await;
+        assert!(
+            api(&server)?
+                .pr_action(&PrCommand::Abandon { id: 7, yes: false })
+                .await
+                .is_err()
+        );
+        assert!(
+            api(&server)?
+                .pipeline_action(&PipelineCommand::Cancel { run: 9, yes: false })
+                .await
+                .is_err()
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .context("Request recording disabled")?
+                .is_empty()
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn merge_preserves_expected_head_and_never_bypasses_policy() -> Result<()> {
+        let server = MockServer::start().await;
+        mock_get(
+            &server,
+            "/org/project/_apis/git/pullrequests/7",
+            pr_fixture(),
+        )
+        .await;
+        Mock::given(method("PATCH")).and(path("/org/project/_apis/git/repositories/repo/pullrequests/7"))
+            .and(body_json(json!({"status":"completed","lastMergeSourceCommit":{"commitId":"expected-head"},"completionOptions":{"mergeStrategy":"squash","bypassPolicy":false,"deleteSourceBranch":false,"transitionWorkItems":false}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status":"active","mergeStatus":"queued"}))).expect(1).mount(&server).await;
+        let out = api(&server)?
+            .pr_action(&PrCommand::Merge {
+                id: 7,
+                strategy: MergeStrategy::Squash,
+                yes: true,
+            })
+            .await?;
+        assert!(out.contains("Completion requested"));
+        assert!(!out.contains("fixture-access-token"));
+        Ok(())
+    }
+    #[tokio::test]
+    async fn edits_draft_without_clearing_other_fields() -> Result<()> {
+        let server = MockServer::start().await;
+        mock_get(
+            &server,
+            "/org/project/_apis/git/pullrequests/7",
+            pr_fixture(),
+        )
+        .await;
+        Mock::given(method("PATCH"))
+            .and(path(
+                "/org/project/_apis/git/repositories/repo/pullrequests/7",
+            ))
+            .and(body_json(json!({"isDraft":false})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        api(&server)?
+            .pr_action(&PrCommand::Edit(PrEdit {
+                id: 7,
+                title: None,
+                description: None,
+                draft: Some(false),
+                add_reviewer: vec![],
+                remove_reviewer: vec![],
+            }))
+            .await?;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn register_keeps_yaml_path_and_repository_in_sdk_payload() -> Result<()> {
+        let server = MockServer::start().await;
+        mock_get(
+            &server,
+            "/org/project/_apis/git/repositories/repo",
+            json!({"id":"repo"}),
+        )
+        .await;
+        Mock::given(method("POST")).and(path("/org/project/_apis/pipelines"))
+            .and(body_json(json!({"name":"ci","configuration":{"type":"yaml","path":"/azure-pipelines.yml","repository":{"id":"repo","type":"azureReposGit"}}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":2,"name":"ci"}))).expect(1).mount(&server).await;
+        api(&server)?
+            .pipeline_action(&PipelineCommand::Register {
+                name: "ci".into(),
+                repo: "repo".into(),
+                yaml: "/azure-pipelines.yml".into(),
+            })
+            .await?;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn cancellation_is_a_sparse_patch() -> Result<()> {
+        let server = MockServer::start().await;
+        mock_run(&server).await;
+        Mock::given(method("PATCH"))
+            .and(path("/org/project/_apis/build/builds/9"))
+            .and(query_param("retry", "false"))
+            .and(body_json(json!({"status":"cancelling"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        api(&server)?
+            .pipeline_action(&PipelineCommand::Cancel { run: 9, yes: true })
+            .await?;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn retry_uses_sdk_retry_query() -> Result<()> {
+        let server = MockServer::start().await;
+        mock_run(&server).await;
+        Mock::given(method("PATCH"))
+            .and(path("/org/project/_apis/build/builds/9"))
+            .and(query_param("retry", "true"))
+            .and(body_json(json!({"status":"inProgress"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        api(&server)?
+            .pipeline_action(&PipelineCommand::Retry { run: 9 })
+            .await?;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn triggers_with_typed_parameters_and_non_secret_variables() -> Result<()> {
+        let server = MockServer::start().await;
+        mock_get(
+            &server,
+            "/org/project/_apis/pipelines/2",
+            json!({"configuration":{"type":"yaml"}}),
+        )
+        .await;
+        Mock::given(method("POST")).and(path("/org/project/_apis/pipelines/2/runs"))
+            .and(body_json(json!({"templateParameters":{"deploy":true,"count":2},"variables":{"mode":{"value":"test","isSecret":false}},"resources":{"repositories":{"self":{"refName":"refs/heads/main"}}}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":9,"state":"inProgress"}))).expect(1).mount(&server).await;
+        let out = api(&server)?
+            .pipeline_action(&PipelineCommand::Run {
+                id: 2,
+                branch: Some("main".into()),
+                param: vec!["deploy=true".into(), "count=2".into()],
+                variable: vec!["mode=test".into()],
+            })
+            .await?;
+        assert!(!out.contains("mode"));
+        Ok(())
+    }
+    #[tokio::test]
+    async fn refuses_classic_pipeline_writes() -> Result<()> {
+        let server = MockServer::start().await;
+        mock_get(
+            &server,
+            "/org/project/_apis/pipelines/2",
+            json!({"configuration":{"type":"designerJson"}}),
+        )
+        .await;
+        assert!(
+            api(&server)?
+                .pipeline_action(&PipelineCommand::Run {
+                    id: 2,
+                    branch: None,
+                    param: vec![],
+                    variable: vec![]
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            server
+                .received_requests()
+                .await
+                .context("Request recording disabled")?
+                .len(),
+            1
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn log_ranges_preserve_line_offsets_and_sanitize_text() -> Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/org/project/_apis/build/builds/9/logs/3"))
+            .and(query_param("startLine", "2000"))
+            .and(query_param("endLine", "3999"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("hello\x1b[31m\r\nworld\n"))
+            .mount(&server)
+            .await;
+        assert_eq!(
+            api(&server)?.log(9, 3, 2000).await?,
+            vec!["hello[31m", "world"]
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn errors_do_not_expose_response_bodies_or_retry_writes() -> Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/project/_apis/git/repositories"))
+            .respond_with(
+                ResponseTemplate::new(503).set_body_string("fixture-access-token sensitive-body"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let message = api(&server)?
+            .repo_create("demo")
+            .await
+            .err()
+            .context("Expected service failure")?
+            .to_string();
+        assert!(message.contains("503"));
+        assert!(!message.contains("sensitive-body"));
+        assert!(!message.contains("fixture-access-token"));
+        Ok(())
+    }
+    #[tokio::test]
+    async fn project_listing_follows_continuation_tokens() -> Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/org/_apis/projects"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-ms-continuationtoken", "100")
+                    .set_body_json(json!({"value":[{"name":"one"}]})),
+            )
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/org/_apis/projects"))
+            .and(query_param("continuationToken", "100"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"value":[{"name":"two"}]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let projects = api(&server)?.projects().await?;
+        assert_eq!(projects.len(), 2);
+        Ok(())
+    }
+    #[tokio::test]
+    async fn discovers_organizations_using_the_current_profile() -> Result<()> {
+        let server = MockServer::start().await;
+        mock_get(
+            &server,
+            "/_apis/profile/profiles/me",
+            json!({"id":"member-id"}),
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/_apis/accounts"))
+            .and(query_param("memberId", "member-id"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"value":[{"accountName":"org"}]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert_eq!(
+            api(&server)?.organizations().await?[0]["accountName"],
+            "org"
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn queued_run_without_timeline_returns_an_empty_sidebar() -> Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/org/project/_apis/build/builds/9/timeline/"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert!(api(&server)?.timeline(9).await?.is_empty());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn project_names_are_encoded_once_in_real_requests() -> Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/A%20Project/_apis/git/repositories"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"name":"demo"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut api = api(&server)?;
+        api.target.project = "A Project".into();
+        api.repo_create("demo").await?;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn permission_errors_have_a_stable_exit_code() -> Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("sensitive denial"))
+            .mount(&server)
+            .await;
+        let error = api(&server)?
+            .repo_create("demo")
+            .await
+            .err()
+            .context("Expected denial")?;
+        assert_eq!(
+            error
+                .downcast_ref::<error::Failure>()
+                .context("Expected permission failure")?
+                .code,
+            4
+        );
+        assert!(!format!("{error:?}").contains("sensitive denial"));
+        Ok(())
+    }
+    #[test]
+    fn parameters_reject_duplicates_and_path_segments_are_encoded() {
+        assert!(pairs(&["x=1".into(), "x=2".into()], true).is_err());
+        assert!(pairs(&["missing-separator".into()], true).is_err());
+        assert_eq!(
+            segment("A Project/../?x=y"),
+            "A%20Project%2F%2E%2E%2F%3Fx%3Dy"
+        );
+    }
+
+    #[test]
+    fn response_ids_cannot_wrap_or_target_another_resource() -> Result<()> {
+        assert_eq!(response_id(&json!({"id":42}), "id")?, 42);
+        for value in [
+            Value::Null,
+            json!({}),
+            json!({"id":"42"}),
+            json!({"id":0}),
+            json!({"id":-1}),
+            json!({"id":4_294_967_297_i64}),
+        ] {
+            assert!(response_id(&value, "id").is_err());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pr_details_reuse_a_single_pr_snapshot() -> Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/org/project/_apis/git/pullrequests/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr_fixture()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        for url in [
+            "/org/project/_apis/git/repositories/repo/pullRequests/7/threads",
+            "/org/project/_apis/git/repositories/repo/pullRequests/7/statuses",
+            "/org/project/_apis/policy/evaluations",
+        ] {
+            mock_get(&server, url, json!({"value":[]})).await;
+        }
+        let (pr, detail) = api(&server)?.pr_details(7).await?;
+        assert_eq!(pr["pullRequestId"], 7);
+        assert!(detail.contains("PR 7"));
+        Ok(())
+    }
+}

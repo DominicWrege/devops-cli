@@ -1,0 +1,138 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version=$(python .github/scripts/release.py validate "$RELEASE_TAG")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - run: python -m unittest discover -s .github/scripts -p 'test_*.py'
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets --target ${{ matrix.target }} -- -D warnings
+      - run: cargo test --locked --target ${{ matrix.target }}
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Smoke test and package
+        shell: bash
+        run: |
+          binary="target/$TARGET/release/devops"
+          if [[ "$TARGET" == *windows* ]]; then binary="$binary.exe"; fi
+          test "$("$binary" --version)" = "devops $VERSION"
+          python .github/scripts/release.py package "$VERSION" "$TARGET" "$binary" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum --check *.sha256
+      - name: Publish complete release
+        shell: bash
+        run: |
+          cat > release-notes.md <<EOF
+          Install on Windows x64 or Linux/WSL x64 and ARM64 with mise:
+
+          \`mise use -g github:$GH_REPO@$VERSION\`
+
+          Start setup with \`devops tui\`. You need your own Entra tenant and public-client app IDs.
+          Linux x64 requires glibc 2.35+, Linux ARM64 requires glibc 2.39+. No macOS release is provided.
+          Live tenant authentication acceptance is still required. See the README and docs/acceptance.md.
+          EOF
+          options=()
+          if [[ "$VERSION" == *-* ]]; then options+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" dist/* --verify-tag --draft \
+            --title "$RELEASE_TAG" --notes-file release-notes.md --generate-notes "${options[@]}"
+          gh release edit "$RELEASE_TAG" --draft=false
+
+  install-smoke:
+    needs: [validate, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04-arm, windows-2022]
+    runs-on: ${{ matrix.os }}
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: jdx/mise-action@v2
+        with:
+          install: false
+          cache: false
+      - name: Install the published archive through mise
+        shell: bash
+        run: |
+          tool="github:$REPOSITORY@$VERSION"
+          if [[ "$VERSION" == *-* ]]; then tool="github:$REPOSITORY[prerelease=true]@$VERSION"; fi
+          mise install "$tool"
+          test "$(mise exec "$tool" -- devops --version)" = "devops $VERSION"
