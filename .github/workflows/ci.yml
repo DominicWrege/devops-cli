@@ -24,6 +24,35 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
 
+  musl:
+    runs-on: ubuntu-22.04
+    env:
+      TARGET: x86_64-unknown-linux-musl
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+      - run: cargo clippy --locked --all-targets --target "$TARGET" -- -D warnings
+      - run: cargo test --locked --target "$TARGET"
+      - run: cargo build --locked --release --target "$TARGET"
+      - name: Verify static linking and run on Alpine
+        run: |
+          binary="target/$TARGET/release/devops"
+          python .github/scripts/release.py verify-static "$binary"
+          docker run --rm --network none --volume "$PWD/$binary:/usr/local/bin/devops:ro" alpine:3.22 devops --help
+
   check:
     strategy:
       fail-fast: false

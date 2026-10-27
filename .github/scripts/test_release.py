@@ -3,12 +3,32 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 import release
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_release_targets_are_x64_only(self):
+        self.assertEqual(set(release.TARGETS), {
+            "x86_64-unknown-linux-musl", "x86_64-pc-windows-msvc",
+        })
+
+    def test_static_check_accepts_static_executables(self):
+        for dynamic in ["There is no dynamic section in this file.", "Dynamic section: (FLAGS_1) PIE"]:
+            with self.subTest(dynamic=dynamic), patch("release.subprocess.run") as run:
+                run.return_value.stdout = dynamic
+                release.verify_static(Path("devops"))
+                self.assertEqual(run.call_count, 2)
+
+    def test_static_check_rejects_an_interpreter_or_needed_library(self):
+        for output in ["INTERP /lib64/ld-linux-x86-64.so.2", "(NEEDED) Shared library: [libc.so.6]"]:
+            with self.subTest(output=output), patch("release.subprocess.run") as run:
+                run.return_value.stdout = output
+                with self.assertRaises(ValueError):
+                    release.verify_static(Path("devops"))
+
     def test_tag_must_match_manifest(self):
         with tempfile.TemporaryDirectory() as temporary:
             manifest = Path(temporary) / "Cargo.toml"

@@ -16,10 +16,9 @@ devops tui
 Use `@0.2.0` instead of `@latest` to pin the version. You can also download an archive from [Releases](https://github.com/DominicWrege/devops-cli/releases).
 
 - Windows x64.
-- Linux/WSL x64 with glibc 2.35 or newer.
-- Linux/WSL ARM64 with glibc 2.39 or newer.
+- Linux/WSL x64, a static musl binary with no glibc requirement.
 
-Install separately on Windows and inside WSL. No macOS or Alpine/musl release is available. Azure CLI is not required.
+Install separately on Windows and inside WSL. No ARM64 or macOS builds are provided. Azure CLI is not required.
 
 ## Sign in
 

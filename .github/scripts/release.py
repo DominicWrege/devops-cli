@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import tomllib
@@ -12,8 +13,7 @@ import zipfile
 
 
 TARGETS = {
-    "x86_64-unknown-linux-gnu": "devops",
-    "aarch64-unknown-linux-gnu": "devops",
+    "x86_64-unknown-linux-musl": "devops",
     "x86_64-pc-windows-msvc": "devops.exe",
 }
 
@@ -25,6 +25,19 @@ def validate(tag, manifest=Path("Cargo.toml")):
     if tag != f"v{version}":
         raise ValueError(f"Tag {tag!r} does not match Cargo.toml version {version!r}")
     return version
+
+
+def verify_static(binary):
+    headers = subprocess.run(
+        ["readelf", "--program-headers", str(binary)],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    dynamic = subprocess.run(
+        ["readelf", "--dynamic", str(binary)],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    if re.search(r"\bINTERP\b", headers) or "(NEEDED)" in dynamic:
+        raise ValueError("Linux release must have no ELF interpreter or shared-library dependencies")
 
 
 def package(version, target, binary, destination, root=Path(".")):
@@ -62,6 +75,8 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     check = commands.add_parser("validate")
     check.add_argument("tag")
+    static = commands.add_parser("verify-static")
+    static.add_argument("binary", type=Path)
     pack = commands.add_parser("package")
     pack.add_argument("version")
     pack.add_argument("target", choices=TARGETS)
@@ -70,6 +85,9 @@ def main():
     args = parser.parse_args()
     if args.command == "validate":
         print(validate(args.tag))
+    elif args.command == "verify-static":
+        verify_static(args.binary)
+        print(f"Verified static ELF: {args.binary}")
     else:
         print(package(args.version, args.target, args.binary, args.destination))
 
