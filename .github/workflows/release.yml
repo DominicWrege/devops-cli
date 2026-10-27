@@ -120,24 +120,6 @@ jobs:
 
   install-smoke:
     needs: [validate, publish]
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, windows-2022]
-    runs-on: ${{ matrix.os }}
-    env:
-      GITHUB_TOKEN: ${{ github.token }}
-      REPOSITORY: ${{ github.repository }}
-      VERSION: ${{ needs.validate.outputs.version }}
-    steps:
-      - uses: jdx/mise-action@v5.2.4
-        with:
-          install: false
-          cache: false
-      - name: Install the published archive through mise
-        shell: bash
-        run: |
-          tool="github:$REPOSITORY@$VERSION"
-          if [[ "$VERSION" == *-* ]]; then tool="github:$REPOSITORY[prerelease=true]@$VERSION"; fi
-          mise install "$tool"
-          test "$(mise exec "$tool" -- devops --version)" = "devops $VERSION"
+    uses: ./.github/workflows/install-smoke.yml
+    with:
+      version: ${{ needs.validate.outputs.version }}

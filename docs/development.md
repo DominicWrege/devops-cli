@@ -48,3 +48,5 @@ mise use -g 'github:DominicWrege/devops-cli[prerelease=true]@0.2.0-rc.1'
 ```
 
 If publication fails after creating a draft, inspect it before retrying. The workflow does not overwrite an existing release or its assets. Passing CI does not verify live Entra sign-in.
+
+Published versions should stay immutable. `v0.2.0` was reissued once to ship static Linux x64 and Windows x64 only. Mise's version index can retain the deleted assets and checksums, so the installation check sets `MISE_USE_VERSIONS_HOST=false` to read GitHub directly. Run `.github/workflows/install-smoke.yml` manually to recheck a published version without rebuilding it.

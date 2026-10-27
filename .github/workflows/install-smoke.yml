@@ -1,0 +1,45 @@
+name: Verify mise installation
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published version to install, without the v prefix
+        type: string
+        required: true
+        default: "0.2.0"
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      VERSION: ${{ inputs.version }}
+      # Verify the just-published assets, not a stale mise-versions index entry.
+      MISE_USE_VERSIONS_HOST: "false"
+    steps:
+      - uses: jdx/mise-action@v5.2.4
+        with:
+          install: false
+          cache: false
+      - name: Install the published archive through mise
+        shell: bash
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+          tool="github:$REPOSITORY@$VERSION"
+          if [[ "$VERSION" == *-* ]]; then tool="github:$REPOSITORY[prerelease=true]@$VERSION"; fi
+          mise install "$tool"
+          test "$(mise exec "$tool" -- devops --version)" = "devops $VERSION"
