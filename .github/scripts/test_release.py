@@ -63,7 +63,9 @@ class ReleaseTests(unittest.TestCase):
                 self.assertIn(f"{prefix}/README.md", files)
                 self.assertIn(f"{prefix}/LICENSES/az-mise-plugin.txt", files)
                 expected = hashlib.sha256(archive.read_bytes()).hexdigest()
-                checksum = archive.with_name(archive.name + ".sha256").read_text(encoding="utf-8")
+                checksum_file = archive.with_name(archive.name + ".sha256")
+                self.assertNotIn(b"\r", checksum_file.read_bytes())
+                checksum = checksum_file.read_text(encoding="utf-8")
                 self.assertEqual(checksum, f"{expected}  {archive.name}\n")
 
 

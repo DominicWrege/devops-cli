@@ -65,7 +65,7 @@ def package(version, target, binary, destination, root=Path(".")):
     with archive.open("rb") as source:
         digest = hashlib.file_digest(source, "sha256").hexdigest()
     archive.with_name(archive.name + ".sha256").write_text(
-        f"{digest}  {archive.name}\n", encoding="utf-8"
+        f"{digest}  {archive.name}\n", encoding="utf-8", newline="\n"
     )
     return archive
 
