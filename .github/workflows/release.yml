@@ -17,8 +17,8 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.12"
       - id: version
@@ -46,8 +46,8 @@ jobs:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ needs.validate.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
@@ -66,7 +66,7 @@ jobs:
           if [[ "$TARGET" == *windows* ]]; then binary="$binary.exe"; fi
           test "$("$binary" --version)" = "devops $VERSION"
           python .github/scripts/release.py package "$VERSION" "$TARGET" "$binary" dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: release-${{ matrix.target }}
           path: dist/*
@@ -83,11 +83,11 @@ jobs:
       RELEASE_TAG: ${{ github.ref_name }}
       VERSION: ${{ needs.validate.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.12"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8.0.2
         with:
           pattern: release-*
           merge-multiple: true
@@ -125,7 +125,7 @@ jobs:
       REPOSITORY: ${{ github.repository }}
       VERSION: ${{ needs.validate.outputs.version }}
     steps:
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v5.2.4
         with:
           install: false
           cache: false
