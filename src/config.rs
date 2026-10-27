@@ -150,34 +150,39 @@ impl Settings {
         )?;
         let project = project
             .or(self.project.as_deref())
-            .ok_or_else(|| invalid("Missing project. Use --project or TUI setup."))?
-            .trim()
-            .to_string();
-        if project.is_empty()
-            || matches!(project.as_str(), "." | "..")
-            || project.contains(['/', '\\'])
-            || project.chars().any(char::is_control)
-        {
-            return Err(invalid(
-                "Project must be a project name or UUID, not a path",
-            ));
-        }
+            .ok_or_else(|| invalid("Missing project. Use --project or TUI setup."))?;
         Ok(Target {
             organization,
-            project,
+            project: project_name(project)?,
         })
     }
     pub fn identity(&self) -> Result<(String, String)> {
         let tenant = self.tenant_id.clone().ok_or_else(|| {
-            invalid("Missing tenant ID. Configure it using `devops tui` or `devops init`.")
+            invalid("Missing tenant ID. Use `devops login --org` to discover it, or pass `--tenant-id`.")
         })?;
-        let client = self.client_id.clone().ok_or_else(|| invalid("Missing public-client application ID. Configure your own Entra registration through setup."))?;
+        let client = self.client_id.clone().ok_or_else(|| {
+            invalid("Missing public-client application ID. Pass `--client-id` to `devops login`.")
+        })?;
         let tenant =
             uuid::Uuid::parse_str(&tenant).map_err(|_| invalid("Tenant ID must be a UUID"))?;
         let client =
             uuid::Uuid::parse_str(&client).map_err(|_| invalid("Client ID must be a UUID"))?;
         Ok((tenant.to_string(), client.to_string()))
     }
+}
+
+pub fn project_name(input: &str) -> Result<String> {
+    let project = input.trim().to_string();
+    if project.is_empty()
+        || matches!(project.as_str(), "." | "..")
+        || project.contains(['/', '\\'])
+        || project.chars().any(char::is_control)
+    {
+        return Err(invalid(
+            "Project must be a project name or UUID, not a path",
+        ));
+    }
+    Ok(project)
 }
 
 pub fn organization(input: &str) -> Result<String> {

@@ -9,8 +9,8 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.2.1
-devops tui
+mise use -g github:DominicWrege/devops-cli@0.2.2
+devops login
 ```
 
 Pin the version. `@latest` ignores releases less than 24 hours old, so it can report no versions just after a release. You can also download an archive from [Releases](https://github.com/DominicWrege/devops-cli/releases).
@@ -22,21 +22,23 @@ Install separately on Windows and inside WSL. No ARM64 or macOS builds are provi
 
 ## Sign in
 
-Run `devops tui`. The first launch opens setup; press `s` to reopen it later.
-
-1. Enter your Entra tenant ID and your own public-client app ID.
-2. Complete sign-in. Windows uses your Windows account through WAM. Linux/WSL shows a device code and a URL to open.
-3. Choose an organization and default project.
-
-Ask your tenant administrator for an app registration with Azure DevOps delegated `user_impersonation` permission and the required consent. Enable public-client flows for device-code login. Windows also needs the broker redirect URI `ms-appx-web://Microsoft.AAD.BrokerPlugin/CLIENT_ID`, with your app ID in place of `CLIENT_ID`. Tenant policy may block device-code login.
-
-Check your session without opening sign-in UI:
-
 ```sh
-devops auth status
+devops login
 ```
 
-Tokens renew silently when your session and tenant policy allow it. If a command exits with code `3`, open `devops tui` and sign in again. Windows and WSL keep separate sessions.
+The first run asks for your organization and Entra public-client app ID. It discovers the tenant from the organization, then completes sign-in. Later runs reuse the saved values. Windows uses your Windows account through WAM. Linux/WSL shows a device code and a URL to open.
+
+Pass the values up front instead:
+
+```sh
+devops login --org my-org --project my-project --client-id APP_UUID
+```
+
+The organization is the first path segment of your Azure DevOps URL: `https://dev.azure.com/my-org/my-project`. The app ID is the one Azure-specific value you must supply: ask your tenant administrator for a public-client app registration with Azure DevOps delegated `user_impersonation` permission and consent. Enable public-client flows for device-code login. Windows also needs the broker redirect URI `ms-appx-web://Microsoft.AAD.BrokerPlugin/CLIENT_ID`, with your app ID in place of `CLIENT_ID`. Tenant policy may block device-code login.
+
+`devops tui` offers the same setup interactively. Press `s` there to reopen it later.
+
+Tokens renew silently when your session and tenant policy allow it. If a command exits with code `3`, run `devops login` again. Windows and WSL keep separate sessions.
 
 This is an early release. Live Windows/WSL sign-in and tenant workflows still need validation.
 
@@ -67,7 +69,7 @@ The pipeline TUI only observes runs. Use the CLI to trigger, retry, cancel, or r
 
 ## Use the CLI
 
-Commands never prompt or open sign-in UI. Output is plain text with tab-separated tables; there is no JSON mode.
+Commands other than `login` never prompt or open sign-in UI. Output is plain text with tab-separated tables; there is no JSON mode.
 
 ### Pull requests
 
@@ -131,11 +133,14 @@ devops pr list --org another-org --project another-project
 
 `--org` and `--project` override saved defaults for one command. They do not save changes or infer a target from Git remotes.
 
-To save defaults without signing in or prompting:
+To save defaults without signing in:
 
 ```sh
-devops init --org my-org --project my-project --tenant-id TENANT_UUID --client-id APP_UUID
+devops init --org my-org --project my-project --client-id APP_UUID
+devops login
 ```
+
+`init` does not discover the tenant. `login` does that when it runs. Add `--tenant-id` to either command only if discovery is unavailable.
 
 Settings live in `~/.config/devops/settings.json`. On Windows that is `%USERPROFILE%\.config\devops\settings.json`, not AppData.
 

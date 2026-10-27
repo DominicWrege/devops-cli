@@ -6,14 +6,10 @@ pub struct Cli {
     #[arg(
         long,
         global = true,
-        help = "Override the saved organization for this invocation"
+        help = "Organization for this command; saved by login"
     )]
     pub org: Option<String>,
-    #[arg(
-        long,
-        global = true,
-        help = "Override the saved project for this invocation"
-    )]
+    #[arg(long, global = true, help = "Project for this command; saved by login")]
     pub project: Option<String>,
     #[command(subcommand)]
     pub command: Command,
@@ -21,6 +17,13 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Sign in and save the organization and client settings
+    Login {
+        #[arg(long, help = "Override the saved tenant ID; discovered from --org")]
+        tenant_id: Option<String>,
+        #[arg(long, help = "Entra public-client application ID")]
+        client_id: Option<String>,
+    },
     /// Launch the interactive interface and setup wizard
     Tui,
     /// Save explicit defaults without prompting or signing in
@@ -29,11 +32,6 @@ pub enum Command {
         tenant_id: Option<String>,
         #[arg(long)]
         client_id: Option<String>,
-    },
-    /// Inspect the current sign-in without prompting
-    Auth {
-        #[command(subcommand)]
-        command: AuthCommand,
     },
     /// Inspect saved defaults without displaying credentials
     Config,
@@ -52,11 +50,6 @@ pub enum Command {
         #[command(subcommand)]
         command: RepoCommand,
     },
-}
-
-#[derive(Subcommand)]
-pub enum AuthCommand {
-    Status,
 }
 
 #[derive(Subcommand, Clone)]

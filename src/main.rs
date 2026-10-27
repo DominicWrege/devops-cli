@@ -62,6 +62,20 @@ async fn run(cli: Cli) -> Result<()> {
     let store = Store::home()?;
     let mut settings = store.load()?;
     match &cli.command {
+        Command::Login {
+            tenant_id,
+            client_id,
+        } => {
+            return login(
+                store,
+                settings,
+                cli.org.as_deref(),
+                cli.project.as_deref(),
+                tenant_id.as_deref(),
+                client_id.as_deref(),
+            )
+            .await;
+        }
         Command::Tui => return tui::run(store, settings, cli.org, cli.project).await,
         Command::Config => {
             return emit(&format!(
@@ -81,7 +95,7 @@ async fn run(cli: Cli) -> Result<()> {
                 settings.project_id = None;
             }
             if let Some(project) = &cli.project {
-                settings.project = Some(project.clone());
+                settings.project = Some(config::project_name(project)?);
                 settings.project_id = None;
             }
             if let Some(tenant) = tenant_id {
@@ -91,26 +105,25 @@ async fn run(cli: Cli) -> Result<()> {
                 settings.client_id = Some(client.clone());
             }
             settings.target(None, None)?;
-            settings.identity()?;
+            if settings.client_id.is_none() {
+                return Err(error::invalid(
+                    "Missing public-client application ID. Pass `--client-id`.",
+                ));
+            }
+            if settings.tenant_id.is_some() {
+                settings.identity()?;
+            }
             store.save(&settings)?;
-            return emit("Saved defaults. Open `devops tui` to sign in.");
+            return emit("Saved defaults. Run `devops login` to sign in.");
         }
         Command::Pr { command } => command.validate()?,
         Command::Pipeline { command } => command.validate()?,
         Command::Repo { command } => command.validate()?,
-        _ => (),
     }
-    let target = if matches!(cli.command, Command::Auth { .. }) {
-        None
-    } else {
-        Some(settings.target(cli.org.as_deref(), cli.project.as_deref())?)
-    };
+    let target = settings.target(cli.org.as_deref(), cli.project.as_deref())?;
     let credential = auth::Credential::new(store, settings.clone())?;
     credential.token().await?; // Authentication failures have a stable non-interactive exit code.
-    if matches!(cli.command, Command::Auth { .. }) {
-        return emit("Signed in. Silent token acquisition succeeded.");
-    }
-    let api = service::Service::new(credential, target.context("Remote command has no target")?)?;
+    let api = service::Service::new(credential, target)?;
     let result = match cli.command {
         Command::Pr { command } => api.pr_action(&command).await?,
         Command::Pipeline {
@@ -130,6 +143,79 @@ async fn run(cli: Cli) -> Result<()> {
         _ => anyhow::bail!("Local command was not handled"),
     };
     emit(&result)
+}
+
+async fn login(
+    store: Store,
+    mut settings: config::Settings,
+    org: Option<&str>,
+    project: Option<&str>,
+    tenant_id: Option<&str>,
+    client_id: Option<&str>,
+) -> Result<()> {
+    if let Some(org) = org {
+        settings.organization = Some(config::organization(org)?);
+        settings.project_id = None;
+    }
+    if let Some(project) = project {
+        settings.project = Some(config::project_name(project)?);
+        settings.project_id = None;
+    }
+    if let Some(tenant) = tenant_id {
+        settings.tenant_id = Some(tenant.into());
+    }
+    if let Some(client) = client_id {
+        settings.client_id = Some(client.into());
+    }
+    if settings.organization.is_none() {
+        let value = prompt("Organization (name or https://dev.azure.com/NAME)", "--org")?;
+        settings.organization = Some(config::organization(&value)?);
+        settings.project_id = None;
+    }
+    if settings.tenant_id.is_none() {
+        let org = settings
+            .organization
+            .as_deref()
+            .context("Login requires an organization")?;
+        settings.tenant_id = Some(auth::discover_tenant(org).await?);
+    }
+    if settings.client_id.is_none() {
+        settings.client_id = Some(prompt("Entra public-client app ID", "--client-id")?);
+    }
+    let (tenant, client) = settings.identity()?;
+    settings.tenant_id = Some(tenant);
+    settings.client_id = Some(client);
+    store.save(&settings)?;
+    let (notify, mut messages) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let printer = tokio::spawn(async move {
+        while let Some(message) = messages.recv().await {
+            emit(&message)?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    let token = auth::login(&store, &settings, notify).await;
+    let printed = printer.await?;
+    let token = token?;
+    printed?;
+    emit(&auth::summary(&settings, &token)?)
+}
+
+fn prompt(label: &str, flag: &str) -> Result<String> {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return Err(error::invalid(format!(
+            "Missing {label}. Pass {flag} when input is not a terminal."
+        )));
+    }
+    eprint!("{label}: ");
+    std::io::stderr().flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    let value = line.trim().to_string();
+    if value.is_empty() {
+        return Err(error::invalid(format!("{label} cannot be empty")));
+    }
+    Ok(value)
 }
 
 async fn watch(api: &service::Service, run: i32) -> Result<()> {

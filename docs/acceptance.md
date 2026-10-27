@@ -14,12 +14,13 @@ No live Azure DevOps writes have been run by the implementation session. Use an 
 ## Authentication and setup
 
 - Configure a tenant-owned public-client app with the Azure DevOps delegated permission, consent, public-client flows and Windows broker redirect URI.
-- On native Windows, use `devops tui` to reuse the Windows Entra account through WAM. Check account selection, consent, required UI, cancellation, and terminal restoration.
-- Restart the process and verify `devops auth status` acquires silently without any UI.
-- In WSL, complete TUI device-code sign-in. Verify `auth.json` is `0600`, its directory is `0700`, and `settings.json` contains no credentials.
+- On native Windows, run `devops login --org <org> --client-id <app-id>` and verify WAM account selection, consent, cancellation, and terminal restoration.
+- Verify tenant discovery from the organization, and check the fallback `--tenant-id` path.
+- Restart the process and verify a normal CLI command acquires a token silently without UI.
+- In WSL, complete `devops login` device-code sign-in. Verify `auth.json` is `0600`, its directory is `0700`, and `settings.json` contains no credentials.
 - Restart WSL and verify the saved Linux session renews silently. Run simultaneous CLI/TUI requests near expiry and check refresh-token rotation.
 - Revoke a session or require interaction through tenant policy. Verify CLI exit code 3 without a prompt, browser, or WAM UI.
-- Select an organization and project from discovered lists. Verify persisted defaults, spaces in project names, and one-command overrides without settings changes.
+- Select an organization and project from discovered lists. Verify persisted defaults, spaces in project names, and one-command overrides without settings changes. Verify `devops login --org ... --project ... --client-id ...` saves all three.
 
 ## Operations
 

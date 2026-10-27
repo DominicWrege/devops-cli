@@ -17,6 +17,7 @@ fn help_is_text_only_and_has_expected_commands() -> anyhow::Result<()> {
         .arg("--help")
         .assert()
         .success()
+        .stdout(predicate::str::contains("login"))
         .stdout(predicate::str::contains("pipeline"))
         .stdout(predicate::str::contains("tui"))
         .stdout(predicate::str::contains("--json").not());
@@ -79,16 +80,28 @@ fn tui_refuses_redirected_input_without_altering_terminal() -> anyhow::Result<()
     Ok(())
 }
 #[test]
-fn no_interactive_cli_login_or_json_output_option() -> anyhow::Result<()> {
+fn no_json_output_option_or_removed_auth_command() -> anyhow::Result<()> {
     let home = tempfile::tempdir()?;
     command(home.path())
-        .args(["auth", "login"])
+        .args(["auth", "status"])
         .assert()
         .code(2);
     command(home.path())
         .args(["pr", "list", "--json"])
         .assert()
         .code(2);
+    Ok(())
+}
+
+#[test]
+fn login_without_configuration_fails_before_network_or_prompting() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    command(home.path())
+        .arg("login")
+        .assert()
+        .code(2)
+        .stdout("")
+        .stderr(predicate::str::contains("--org"));
     Ok(())
 }
 

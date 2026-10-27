@@ -1,9 +1,9 @@
 [package]
 name = "devops"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.88"
-description = "Azure DevOps CLI for agents and TUI for humans"
+description = "Azure DevOps CLI and TUI"
 
 [dependencies]
 anyhow = "1"

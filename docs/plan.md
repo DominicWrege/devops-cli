@@ -9,7 +9,7 @@ Status: initial implementation in place. The user authorized implementation on 2
 - Support agents running natively on Windows and inside WSL on the same PC. Remote hosts and CI are not first-release requirements. Linux/WSL uses its own device-code session rather than sharing the Windows WAM session.
 - Use WAM for native Windows and Microsoft Entra OAuth 2.0 device-code login for Linux/WSL. Do not require a Windows executable or broker bridge for Linux/WSL. See [ADR 0009](adr/0009-linux-device-code-authentication.md).
 - Treat the TUI as the human interface and the CLI as the agent interface. See [ADR 0003](adr/0003-tui-for-humans-cli-for-agents.md).
-- CLI output is text only, including for agents. Do not add JSON output or a `--json` flag. CLI commands never prompt. See [ADR 0005](adr/0005-text-only-cli-output.md), which supersedes ADR 0004.
+- CLI output is text only. Do not add JSON output or a `--json` flag. Except for the explicit interactive `login` command, CLI commands never prompt. See [ADR 0005](adr/0005-text-only-cli-output.md), which supersedes ADR 0004.
 - Ship one binary with an explicit `tui` subcommand. CLI commands do not launch the TUI. See [ADR 0001](adr/0001-cli-and-tui-entry-points.md).
 - Target Azure DevOps. Azure infrastructure management is outside the current scope.
 - Support Microsoft-hosted Azure DevOps Services in the first release. Self-hosted Azure DevOps Server is outside the current scope.
@@ -26,7 +26,7 @@ Status: initial implementation in place. The user authorized implementation on 2
 - Use GitHub CLI, `gh`, as the CLI design reference, not as a feature-parity requirement. See [ADR 0002](adr/0002-use-gh-as-cli-reference.md).
 - During TUI setup, discover accessible Azure DevOps organizations, let the user select one, then query its projects and save the chosen organization/project defaults in `~/.config/devops/settings.json`. Resolve `~` to the user's home directory, including on Windows; do not substitute AppData. The `devops` directory name is provisional until naming is settled. See [ADR 0008](adr/0008-user-project-settings.md).
 - Resolve organization/project from settings unless explicitly overridden by flags. Overrides apply only to that invocation and never modify saved settings. Do not infer a different target from the current Git remote.
-- Keep interactive initial setup in the TUI. A CLI `init` equivalent accepts explicit arguments and never prompts.
+- Support interactive setup through both `devops login` and the TUI. The CLI `init` command accepts explicit arguments and never prompts.
 - Confirm high-impact writes only: merging/completing or abandoning a PR and canceling a pipeline run. Require TUI confirmation where the action is available and an explicit acknowledgement flag in the non-interactive CLI. Routine creates, edits, comments, and votes need no extra confirmation. Explicit trigger, rerun, and retry commands are sufficient without an extra acknowledgement flag, including for pipelines that can deploy. See [ADR 0010](adr/0010-high-impact-write-confirmation.md).
 
 ## Remaining checks
@@ -107,8 +107,8 @@ The subsequent [code review](code-review.md) removed Rust `unwrap`/`expect` pani
 
 - Human setup discovers organizations and projects and persists the selected defaults at the agreed home-config path.
 - Explicit context flags override saved defaults without changing the settings file. Missing required context fails without prompting; the current directory does not silently change the target.
-- Windows reuses the Entra account through WAM. Linux/WSL completes device-code login in the TUI, persists its owner-only cache, and renews silently across CLI invocations.
-- CLI commands never prompt, open authentication UI, or launch the TUI. Authentication requiring human interaction fails with a clear instruction to use the TUI.
+- Windows reuses the Entra account through WAM. Linux/WSL completes device-code login in `devops login` or the TUI, persists its owner-only cache, and renews silently across CLI invocations.
+- Except for `devops login`, CLI commands never prompt, open authentication UI, or launch the TUI. Authentication requiring human interaction fails with a clear instruction to run `devops login`.
 - Credentials never appear in settings, command output, or diagnostic logs. Linux cache writes are atomic, owner-only, and coordinated between processes.
 - All selected PR operations work through the CLI and TUI. Merge and abandonment follow the accepted acknowledgement/confirmation rules and respect server permissions and policies.
 - The selected YAML pipeline CLI operations work, with retry behavior limited to verified service/SDK support. Trigger/rerun/retry need no extra acknowledgement; cancellation does.

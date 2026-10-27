@@ -35,16 +35,16 @@ The Azure DevOps SDK is deprecated upstream. Small request policies repair missi
 Set `package.version` in `Cargo.toml`, update `Cargo.lock`, commit, and push a matching tag:
 
 ```sh
-git tag v0.2.1
-git push origin v0.2.1
+git tag v0.2.2
+git push origin v0.2.2
 ```
 
 `.github/workflows/release.yml` validates the tag, tests and builds on each native platform, packages the binaries, verifies SHA-256 checksums, and publishes a GitHub release. The publishing job alone has write permission. Each archive includes the WAM attribution notice. A final job installs the published release through mise on each platform.
 
-Tags such as `v0.2.1-rc.1` become prereleases. Install them with:
+Tags such as `v0.2.2-rc.1` become prereleases. Install them with:
 
 ```sh
-mise use -g 'github:DominicWrege/devops-cli[prerelease=true]@0.2.1-rc.1'
+mise use -g 'github:DominicWrege/devops-cli[prerelease=true]@0.2.2-rc.1'
 ```
 
 If publication fails after creating a draft, inspect it before retrying. The workflow does not overwrite an existing release or its assets. Passing CI does not verify live Entra sign-in.

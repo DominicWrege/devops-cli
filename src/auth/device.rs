@@ -102,7 +102,7 @@ pub async fn login(
     store: &Store,
     settings: &Settings,
     notify: tokio::sync::mpsc::UnboundedSender<String>,
-) -> Result<()> {
+) -> Result<AccessToken> {
     let (tenant, _) = settings.identity()?;
     login_at(
         store,
@@ -124,7 +124,7 @@ async fn login_at(
     notify: tokio::sync::mpsc::UnboundedSender<String>,
     device_url: DeviceAuthorizationUrl,
     token_url: TokenUrl,
-) -> Result<()> {
+) -> Result<AccessToken> {
     let (tenant, client_id) = settings.identity()?;
     let client = BasicClient::new(ClientId::new(client_id.clone()))
         .set_token_uri(token_url)
@@ -157,7 +157,11 @@ async fn login_at(
         expires_at: expires_at(response.expires_in())?,
     };
     let _lock = lock(store).await?;
-    store.write("auth.json", &session)
+    store.write("auth.json", &session)?;
+    Ok(AccessToken::new(
+        session.access_token,
+        OffsetDateTime::from_unix_timestamp(session.expires_at)?,
+    ))
 }
 
 #[cfg(test)]
