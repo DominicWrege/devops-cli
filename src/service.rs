@@ -86,6 +86,8 @@ impl Policy for SdkPath {
         // adds another slash when joining the organization/API path.
         let path = format!("/{}", request.url().path().trim_start_matches('/'));
         request.url_mut().set_path(&path);
+        // API clients must receive authentication errors, not browser sign-in redirects.
+        request.insert_header("x-tfs-fedauthredirect", "Suppress");
         next_policy(ctx, request, next).await
     }
 }
@@ -1010,6 +1012,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pat_login_suppresses_browser_redirects() -> Result<()> {
+        let server = MockServer::start().await;
+        let mut api = api(&server)?;
+        api.credential = auth::Credential::from_pat("fixture-pat".into())?.sdk();
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", "https://example.invalid/signin"),
+            )
+            .with_priority(10)
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(header("x-tfs-fedauthredirect", "Suppress"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let failure = api
+            .check_access()
+            .await
+            .err()
+            .context("Expected authentication failure")?;
+        assert_eq!(
+            failure
+                .downcast_ref::<error::Failure>()
+                .context("Expected stable authentication error")?
+                .code,
+            3
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn pat_uses_basic_auth_for_project_validation_and_operations() -> Result<()> {
         use base64::Engine;
         let server = MockServer::start().await;
@@ -1023,6 +1060,7 @@ mod tests {
             .and(path("/org/_apis/projects"))
             .and(query_param("$top", "1"))
             .and(header("authorization", authorization.as_str()))
+            .and(header("x-tfs-fedauthredirect", "Suppress"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[]})))
             .expect(1)
             .mount(&server)
@@ -1030,6 +1068,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/org/project/_apis/pipelines"))
             .and(header("authorization", authorization.as_str()))
+            .and(header("x-tfs-fedauthredirect", "Suppress"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[]})))
             .expect(1)
             .mount(&server)

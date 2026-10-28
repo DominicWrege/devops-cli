@@ -108,7 +108,9 @@ jobs:
 
           \`mise use -g github:$GH_REPO@$VERSION\`
 
-          Start setup with \`devops login\`. Enter your organization and a personal access token at the hidden prompt; no Entra app registration is required. Entra sign-in remains available with \`--entra\`.
+          Start setup with \`devops login\`. Enter your organization and a personal access token at the masked prompt; no Entra app registration is required. Entra sign-in remains available with \`--entra\`.
+          This release adds masked PAT input, suppresses browser sign-in redirects for API requests, remembers your current project, and improves TUI navigation. Tab switches views during reads; cached lists preserve your selection. Pipeline activity appears beside the selected pipeline, with run status icons. Press F5 to refresh cached data.
+
           Linux uses a static musl binary, with no glibc requirement. ARM64 and macOS builds are not provided.
           Live tenant authentication acceptance is still required. See the README and docs/acceptance.md.
           EOF

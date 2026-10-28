@@ -86,6 +86,10 @@ enum Message {
         log: Option<(LogKey, u64, Vec<String>)>,
         log_error: Option<String>,
     },
+    Activity {
+        pipeline: i32,
+        values: Vec<Value>,
+    },
     Written(String),
     Error(String),
 }
@@ -214,6 +218,15 @@ struct App {
     confirm: Option<PrCommand>,
     status: String,
     task: Option<JoinHandle<()>>,
+    writing: bool,
+    activity: Vec<Value>,
+    activity_pipeline: Option<i32>,
+    pr_cache: Option<(Target, bool, Vec<Value>)>,
+    pipeline_cache: Option<(Target, Vec<Value>)>,
+    activity_cache: std::collections::HashMap<String, Vec<Value>>,
+    pr_selection: usize,
+    pipeline_selection: usize,
+    activity_due: Option<Instant>,
     tx: mpsc::UnboundedSender<(u64, Message)>,
     generation: u64,
     poll_at: Instant,
@@ -246,10 +259,63 @@ impl App {
             confirm: None,
             status: String::new(),
             task: None,
+            writing: false,
+            activity: Vec::new(),
+            activity_pipeline: None,
+            pr_cache: None,
+            pipeline_cache: None,
+            activity_cache: std::collections::HashMap::new(),
+            pr_selection: 0,
+            pipeline_selection: 0,
+            activity_due: None,
             tx,
             generation: 0,
             poll_at: Instant::now(),
         }
+    }
+    fn start(&mut self) -> Result<()> {
+        let mut identity = self.settings.clone();
+        if let Some(org) = &self.org {
+            identity.organization = Some(crate::config::organization(org)?);
+        }
+        if auth::Credential::new(self.store.clone(), identity).is_err() {
+            self.identity_form();
+        } else if self
+            .settings
+            .target(self.org.as_deref(), self.project.as_deref())
+            .is_err()
+        {
+            self.choose_project()?;
+        } else {
+            self.open_workspace();
+        }
+        Ok(())
+    }
+    fn open_workspace(&mut self) {
+        self.set_screen(Screen::Prs(Vec::new()));
+        if let Err(error) = self.load_prs() {
+            self.status = output::clean(&error.to_string());
+        }
+    }
+    fn choose_project(&mut self) -> Result<()> {
+        let organization = crate::config::organization(
+            self.org
+                .as_deref()
+                .or(self.settings.organization.as_deref())
+                .context("Sign in first with s")?,
+        )?;
+        let mut identity = self.settings.clone();
+        identity.organization = Some(organization.clone());
+        let api = Service::new(
+            auth::Credential::new(self.store.clone(), identity)?,
+            Target {
+                organization: organization.clone(),
+                project: String::new(),
+            },
+        )?;
+        self.setup_org = Some(organization);
+        self.launch(async move { Ok(Message::Projects(api.projects().await?)) });
+        Ok(())
     }
     fn api(&self) -> Result<Service> {
         let target = self
@@ -269,6 +335,8 @@ impl App {
         )
     }
     fn cancel_task(&mut self) {
+        self.activity_due = None;
+        self.writing = false;
         self.generation = self.generation.wrapping_add(1);
         if let Some(task) = self.task.take() {
             task.abort();
@@ -291,8 +359,20 @@ impl App {
         }));
     }
     fn set_screen(&mut self, screen: Screen) {
+        match self.screen {
+            Screen::Prs(_) => self.pr_selection = self.selection.selected().unwrap_or(0),
+            Screen::Pipelines(_) => {
+                self.pipeline_selection = self.selection.selected().unwrap_or(0)
+            }
+            _ => {}
+        }
+        let selected = match &screen {
+            Screen::Prs(items) => self.pr_selection.min(items.len().saturating_sub(1)),
+            Screen::Pipelines(items) => self.pipeline_selection.min(items.len().saturating_sub(1)),
+            _ => 0,
+        };
         self.screen = screen;
-        self.selection = ListState::default().with_selected(Some(0));
+        self.selection = ListState::default().with_selected(Some(selected));
         self.detail_scroll = 0;
     }
     fn identity_form(&mut self) {
@@ -360,8 +440,22 @@ impl App {
         Ok(())
     }
     fn load_prs(&mut self) -> Result<()> {
+        let target = self
+            .settings
+            .target(self.org.as_deref(), self.project.as_deref())?;
+        if let Some((cached_target, attention, items)) = &self.pr_cache
+            && *cached_target == target
+            && *attention == self.attention
+        {
+            let items = items.clone();
+            self.cancel_task();
+            self.set_screen(Screen::Prs(items));
+            self.status = "F5 refreshes this view".into();
+            return Ok(());
+        }
         let api = self.api()?;
         let attention = self.attention;
+        self.set_screen(Screen::Prs(Vec::new()));
         self.launch(async move {
             Ok(Message::Prs(if attention {
                 api.attention_prs().await?
@@ -372,8 +466,60 @@ impl App {
         Ok(())
     }
     fn load_pipelines(&mut self) -> Result<()> {
+        let target = self
+            .settings
+            .target(self.org.as_deref(), self.project.as_deref())?;
+        if let Some((cached_target, items)) = &self.pipeline_cache
+            && *cached_target == target
+        {
+            let items = items.clone();
+            self.cancel_task();
+            self.set_screen(Screen::Pipelines(items));
+            self.status = "F5 refreshes this view".into();
+            return self.load_activity();
+        }
         let api = self.api()?;
+        self.set_screen(Screen::Pipelines(Vec::new()));
+        self.activity.clear();
+        self.activity_pipeline = None;
         self.launch(async move { Ok(Message::Pipelines(api.pipeline_list().await?)) });
+        Ok(())
+    }
+    fn activity_key(&self, pipeline: i32) -> Result<String> {
+        let target = self
+            .settings
+            .target(self.org.as_deref(), self.project.as_deref())?;
+        Ok(format!(
+            "{}/{}/{pipeline}",
+            target.organization, target.project
+        ))
+    }
+    fn load_activity(&mut self) -> Result<()> {
+        let Screen::Pipelines(items) = &self.screen else {
+            return Ok(());
+        };
+        let Some(item) = items.get(self.selection.selected().unwrap_or(0)) else {
+            return Ok(());
+        };
+        let pipeline = response_id(item, "id")?;
+        let key = self.activity_key(pipeline)?;
+        if let Some(values) = self.activity_cache.get(&key) {
+            let values = values.clone();
+            self.cancel_task();
+            self.activity = values;
+            self.activity_pipeline = Some(pipeline);
+            self.status = "F5 refreshes this view".into();
+            return Ok(());
+        }
+        let api = self.api()?;
+        self.activity.clear();
+        self.activity_pipeline = Some(pipeline);
+        self.launch(async move {
+            Ok(Message::Activity {
+                pipeline,
+                values: api.runs(pipeline).await?,
+            })
+        });
         Ok(())
     }
     fn load_pr(&mut self, id: i32) -> Result<()> {
@@ -397,6 +543,7 @@ impl App {
     fn execute_pr(&mut self, command: PrCommand) -> Result<()> {
         let api = self.api()?;
         self.launch(async move { Ok(Message::Written(api.pr_action(&command).await?)) });
+        self.writing = true;
         Ok(())
     }
     fn poll(&mut self) -> Result<()> {
@@ -437,13 +584,54 @@ impl App {
             return;
         }
         self.task = None;
+        self.writing = false;
         self.status = String::new();
         match message {
             Message::Organizations(items) => self.set_screen(Screen::Organizations(items)),
-            Message::Projects(items) => self.set_screen(Screen::Projects(items)),
-            Message::Prs(items) => self.set_screen(Screen::Prs(items)),
+            Message::Projects(items) => {
+                let selected = if self.setup_org == self.settings.organization {
+                    items
+                        .iter()
+                        .position(|v| Some(text(v, "name")) == self.settings.project.as_deref())
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                self.set_screen(Screen::Projects(items));
+                self.selection.select(Some(selected));
+            }
+            Message::Prs(items) => {
+                if let Ok(target) = self
+                    .settings
+                    .target(self.org.as_deref(), self.project.as_deref())
+                {
+                    self.pr_cache = Some((target, self.attention, items.clone()));
+                }
+                self.set_screen(Screen::Prs(items));
+            }
             Message::Pr { value, detail } => self.set_screen(Screen::Pr { value, detail }),
-            Message::Pipelines(items) => self.set_screen(Screen::Pipelines(items)),
+            Message::Pipelines(items) => {
+                if let Ok(target) = self
+                    .settings
+                    .target(self.org.as_deref(), self.project.as_deref())
+                {
+                    self.pipeline_cache = Some((target, items.clone()));
+                }
+                self.set_screen(Screen::Pipelines(items));
+                if let Err(error) = self.load_activity() {
+                    self.status = error.to_string();
+                }
+            }
+            Message::Activity { pipeline, values } => {
+                if matches!(self.screen, Screen::Pipelines(_))
+                    && self.activity_pipeline == Some(pipeline)
+                {
+                    if let Ok(key) = self.activity_key(pipeline) {
+                        self.activity_cache.insert(key, values.clone());
+                    }
+                    self.activity = values;
+                }
+            }
             Message::Runs { pipeline, values } => {
                 self.set_screen(Screen::Runs { pipeline, values })
             }
@@ -463,6 +651,7 @@ impl App {
                 }
             }
             Message::Written(message) => {
+                self.pr_cache = None;
                 self.status = format!("{message}\nPress F5 to refresh.");
             }
             Message::Error(message) => {
@@ -559,14 +748,11 @@ impl App {
                 }
                 settings.target(None, None)?;
                 self.store.save(&settings)?;
-                if settings.auth == AuthMethod::Pat {
-                    self.org = None;
-                    self.project = None;
-                }
+                self.org = None;
+                self.project = None;
                 self.settings = settings;
                 self.setup_org = None;
-                self.set_screen(Screen::Home);
-                self.status = "Saved defaults. p: pull requests, l: pipelines".into();
+                self.open_workspace();
             }
             Screen::Prs(items) => {
                 if let Some(item) = items.get(index) {
@@ -653,6 +839,9 @@ impl App {
         Ok(())
     }
     fn refresh(&mut self) -> Result<()> {
+        self.pr_cache = None;
+        self.pipeline_cache = None;
+        self.activity_cache.clear();
         match &self.screen {
             Screen::Prs(_) => self.load_prs()?,
             Screen::Pr { value, .. } => self.load_pr(response_id(value, "pullRequestId")?)?,
@@ -715,8 +904,34 @@ impl App {
         if key.code == KeyCode::Char('q') {
             return Ok(true);
         }
+        // Switch views before the loading guard; never interrupt a submitted write.
+        if matches!(
+            key.code,
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('1' | '2')
+        ) && !self.writing
+            && matches!(
+                self.screen,
+                Screen::Prs(_)
+                    | Screen::Pr { .. }
+                    | Screen::Pipelines(_)
+                    | Screen::Runs { .. }
+                    | Screen::Watch(_)
+            )
+        {
+            let pipelines = match key.code {
+                KeyCode::Char('1') => false,
+                KeyCode::Char('2') => true,
+                _ => matches!(self.screen, Screen::Prs(_) | Screen::Pr { .. }),
+            };
+            if pipelines {
+                self.load_pipelines()?;
+            } else {
+                self.load_prs()?;
+            }
+            return Ok(false);
+        }
         // Keep navigation responsive while polling, but don't overlap writes or setup.
-        if self.task.is_some() && !matches!(self.screen, Screen::Watch(_)) {
+        if self.task.is_some() && !matches!(self.screen, Screen::Watch(_) | Screen::Pipelines(_)) {
             return Ok(false);
         }
         if let Screen::Watch(viewer) = &mut self.screen {
@@ -736,7 +951,17 @@ impl App {
             return Ok(false);
         }
         match key.code {
-            KeyCode::Esc => self.set_screen(Screen::Home),
+            KeyCode::Char('P') => self.choose_project()?,
+            KeyCode::Char('1') => {
+                self.attention = false;
+                self.load_prs()?;
+            }
+            KeyCode::Char('2') => self.load_pipelines()?,
+            KeyCode::Esc => match self.screen {
+                Screen::Pr { .. } => self.load_prs()?,
+                Screen::Runs { .. } => self.load_pipelines()?,
+                _ => self.set_screen(Screen::Home),
+            },
             KeyCode::Char('p') => {
                 self.attention = false;
                 self.load_prs()?;
@@ -778,6 +1003,36 @@ impl App {
             }
             _ => (),
         }
+        if matches!(
+            key.code,
+            KeyCode::Up | KeyCode::Down | KeyCode::Char('j' | 'k')
+        ) && matches!(self.screen, Screen::Pipelines(_))
+        {
+            let pipeline = if let Screen::Pipelines(items) = &self.screen {
+                items
+                    .get(self.selection.selected().unwrap_or(0))
+                    .map(|v| response_id(v, "id"))
+                    .transpose()?
+            } else {
+                None
+            };
+            if let Some(pipeline) = pipeline
+                && self.activity_pipeline != Some(pipeline)
+            {
+                self.cancel_task();
+                if self
+                    .activity_cache
+                    .contains_key(&self.activity_key(pipeline)?)
+                {
+                    self.load_activity()?;
+                } else {
+                    self.activity.clear();
+                    self.activity_pipeline = Some(pipeline);
+                    self.status = "Loading activity...".into();
+                    self.activity_due = Some(Instant::now() + Duration::from_millis(150));
+                }
+            }
+        }
         Ok(false)
     }
 }
@@ -790,13 +1045,8 @@ pub async fn run(
 ) -> Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut app = App::new(store, settings, org, project, tx);
-    if auth::Credential::new(app.store.clone(), app.settings.clone()).is_err()
-        || app
-            .settings
-            .target(app.org.as_deref(), app.project.as_deref())
-            .is_err()
-    {
-        app.identity_form();
+    if let Err(error) = app.start() {
+        app.status = output::clean(&error.to_string());
     }
     let (_guard, mut terminal) = TerminalGuard::enter()?;
     loop {
@@ -810,6 +1060,12 @@ pub async fn run(
         {
             app.status = error.to_string();
             app.poll_at = Instant::now() + Duration::from_secs(2);
+        }
+        if app.activity_due.is_some_and(|due| Instant::now() >= due) {
+            app.activity_due = None;
+            if let Err(error) = app.load_activity() {
+                app.status = error.to_string();
+            }
         }
         terminal.draw(|frame| draw(frame, &mut app))?;
         if event::poll(Duration::from_millis(40))? {
@@ -828,7 +1084,7 @@ pub async fn run(
 fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let layout = Layout::vertical([
-        Constraint::Length(2),
+        Constraint::Length(4),
         Constraint::Min(1),
         Constraint::Length(5),
     ])
@@ -839,13 +1095,41 @@ fn draw(frame: &mut Frame, app: &mut App) {
         .map(|t| format!("{} / {}", t.organization, t.project))
         .unwrap_or_else(|_| "Setup required".into());
     frame.render_widget(
-        Paragraph::new(output::cell(&format!("DevOps   {context}")))
-            .style(Style::default().fg(Color::Cyan)),
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                output::cell(&format!(" DevOps   {context}")),
+                Style::default().fg(Color::Cyan).bold(),
+            )),
+            Line::from(vec![
+                Span::styled(
+                    " 1 ⑂ Pull requests ",
+                    if matches!(app.screen, Screen::Prs(_) | Screen::Pr { .. }) {
+                        Style::default().bg(Color::Cyan).fg(Color::Black).bold()
+                    } else {
+                        Style::default()
+                    },
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    " 2 ▶ Pipelines ",
+                    if matches!(
+                        app.screen,
+                        Screen::Pipelines(_) | Screen::Runs { .. } | Screen::Watch(_)
+                    ) {
+                        Style::default().bg(Color::Cyan).fg(Color::Black).bold()
+                    } else {
+                        Style::default()
+                    },
+                ),
+                Span::raw("   P ◇ Project   s Account"),
+            ]),
+        ])
+        .block(Block::default().borders(Borders::BOTTOM)),
         layout[0],
     );
     let help = match &mut app.screen {
         Screen::Home => {
-            frame.render_widget(Paragraph::new("p  Pull requests\ni  Assigned reviews needing attention\nl  YAML pipelines\ns  Sign in / setup\nq  Quit\n\nThe pipeline screen is observation-only. Use the CLI for pipeline writes.\n\nSetup asks for a personal access token (hidden input); no app registration required.\nRepository autodetection is not available yet; choose your organization and project.\nExisting Windows and WSL sessions are separate.").block(Block::bordered().title("Home")),layout[1]);
+            frame.render_widget(Paragraph::new("Your project is remembered between sessions.\n\n1  Pull requests     Review and manage your team's work\n2  Pipelines         Browse runs and follow logs\nP  Switch project    Choose and remember a different project\ns  Account           Sign in or replace your token\nq  Quit\n\nUse Tab to switch between pull requests and pipelines.\nSelect a row with Up/Down or j/k; press Enter to open it.").block(Block::bordered().title("Home")),layout[1]);
             "p: PRs   i: assigned reviews   l: pipelines   s: setup   q: quit"
         }
         Screen::Organizations(items) => {
@@ -865,16 +1149,44 @@ fn draw(frame: &mut Frame, app: &mut App) {
             draw_list(
                 frame,
                 layout[1],
-                "Select default project",
+                "Choose current project (remembered next time)",
                 items.iter().map(|v| text(v, "name").into()).collect(),
                 &mut app.selection,
             );
-            "Up/Down: select   Enter: save   Esc: home"
+            "Up/Down: select   Enter: use and remember   Esc: cancel"
         }
         Screen::Prs(items) => {
+            let panes = if layout[1].width >= 90 {
+                Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+                    .split(layout[1])
+            } else {
+                Layout::horizontal([Constraint::Percentage(100)]).split(layout[1])
+            };
+            if panes.len() > 1 {
+                let preview = items
+                    .get(app.selection.selected().unwrap_or(0))
+                    .map(|v| {
+                        format!(
+                            "{}\n\n{} -> {}\n\n{}\n\nEnter to open details and actions",
+                            text(v, "title"),
+                            text(v, "sourceRefName").trim_start_matches("refs/heads/"),
+                            text(v, "targetRefName").trim_start_matches("refs/heads/"),
+                            text(v, "description")
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        "No active pull requests.\n\nPress n to create one or F5 to refresh.".into()
+                    });
+                frame.render_widget(
+                    Paragraph::new(output::clean(&preview))
+                        .wrap(Wrap { trim: false })
+                        .block(Block::bordered().title("Preview")),
+                    panes[1],
+                );
+            }
             draw_list(
                 frame,
-                layout[1],
+                panes[0],
                 if app.attention {
                     "Assigned reviews needing attention"
                 } else {
@@ -906,9 +1218,52 @@ fn draw(frame: &mut Frame, app: &mut App) {
             "n: create   e: edit   c: comment   v: vote   m: merge   a: abandon   r: reactivate\nPgUp/PgDn: scroll   F5: refresh   Esc: home"
         }
         Screen::Pipelines(items) => {
+            let panes = if layout[1].width >= 90 {
+                Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+                    .split(layout[1])
+            } else {
+                Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)])
+                    .split(layout[1])
+            };
+            let name = items
+                .get(app.selection.selected().unwrap_or(0))
+                .map(|v| text(v, "name"))
+                .unwrap_or("Select a pipeline");
+            let activity = if app.activity.is_empty() {
+                if app.task.is_some() || app.activity_due.is_some() {
+                    "Loading recent runs...".into()
+                } else if !app.status.is_empty() {
+                    "Could not load activity. Press F5 to retry.".into()
+                } else {
+                    "No recent runs. Press Enter to open the run list.".into()
+                }
+            } else {
+                app.activity
+                    .iter()
+                    .take(20)
+                    .map(|run| {
+                        format!(
+                            "{} #{}  {}  {}  {}\n    {}",
+                            run_icon(run),
+                            scalar(&run["id"]),
+                            text(run, "name"),
+                            text(run, "state"),
+                            text(run, "result"),
+                            text(run, "createdDate")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            };
+            frame.render_widget(
+                Paragraph::new(output::clean(&activity))
+                    .wrap(Wrap { trim: false })
+                    .block(Block::bordered().title(output::cell(&format!("Activity | {name}")))),
+                panes[1],
+            );
             draw_list(
                 frame,
-                layout[1],
+                panes[0],
                 "YAML pipelines",
                 items
                     .iter()
@@ -916,7 +1271,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                     .collect(),
                 &mut app.selection,
             );
-            "Enter: runs   F5: refresh   Esc: home"
+            "Up/Down: pipeline   Enter: open runs   Tab: pull requests   F5: refresh"
         }
         Screen::Runs { values, .. } => {
             draw_list(
@@ -1008,6 +1363,16 @@ fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
+fn run_icon(run: &Value) -> &'static str {
+    match (text(run, "state"), text(run, "result")) {
+        (_, "succeeded") => "✓",
+        (_, "failed") => "✗",
+        (_, "canceled") => "■",
+        ("inProgress", _) => "▶",
+        _ => "○",
+    }
+}
+
 fn draw_list(
     frame: &mut Frame,
     area: Rect,
@@ -1026,7 +1391,7 @@ fn draw_list(
     frame.render_stateful_widget(
         List::new(items)
             .highlight_symbol("> ")
-            .highlight_style(Style::default().fg(Color::Yellow))
+            .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::Cyan).bold())
             .block(Block::bordered().title(title)),
         area,
         state,
@@ -1160,6 +1525,125 @@ mod tests {
     fn key(code: KeyCode) -> Event {
         Event::Key(event::KeyEvent::new(code, KeyModifiers::NONE))
     }
+    #[tokio::test]
+    async fn saved_project_opens_workspace_without_setup_on_restart() -> Result<()> {
+        let (_root, mut app) = fixture()?;
+        auth::pat::save(&app.store, "saved", "fixture-pat")?;
+        app.setup_org = Some("saved".into());
+        app.screen = Screen::Projects(vec![json!({"id":"chosen-id", "name":"Chosen Project"})]);
+        app.enter()?;
+        let settings = app.store.load()?;
+        assert_eq!(settings.project.as_deref(), Some("Chosen Project"));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut restarted = App::new(app.store.clone(), settings, None, None, tx);
+        restarted.start()?;
+        assert!(restarted.form.is_none());
+        assert!(matches!(restarted.screen, Screen::Prs(_)));
+        assert!(restarted.setup_org.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tabs_switch_during_reads_and_from_logs_but_not_writes() -> Result<()> {
+        let (_root, mut app) = fixture()?;
+        auth::pat::save(&app.store, "saved", "fixture-pat")?;
+        app.load_prs()?;
+        let old_generation = app.generation;
+        app.handle(key(KeyCode::Tab))?;
+        assert!(matches!(app.screen, Screen::Pipelines(_)));
+        app.receive((old_generation, Message::Prs(vec![])));
+        assert!(matches!(app.screen, Screen::Pipelines(_)));
+        app.handle(key(KeyCode::BackTab))?;
+        assert!(matches!(app.screen, Screen::Prs(_)));
+        app.writing = true;
+        let generation = app.generation;
+        app.handle(key(KeyCode::Tab))?;
+        assert_eq!(app.generation, generation);
+        app.cancel_task();
+        app.screen = Screen::Watch(Box::new(Viewer::new(1)));
+        app.handle(key(KeyCode::Tab))?;
+        assert!(matches!(app.screen, Screen::Prs(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn activity_ignores_another_pipeline_and_renders_current_runs() -> Result<()> {
+        let (_root, mut app) = fixture()?;
+        app.screen = Screen::Pipelines(vec![json!({"id":7,"name":"Build app"})]);
+        app.activity_pipeline = Some(7);
+        app.receive((
+            app.generation,
+            Message::Activity {
+                pipeline: 8,
+                values: vec![json!({"id":99})],
+            },
+        ));
+        assert!(app.activity.is_empty());
+        app.receive((
+            app.generation,
+            Message::Activity {
+                pipeline: 7,
+                values: vec![
+                    json!({"id":42,"name":"Build 42","state":"completed","result":"succeeded"}),
+                ],
+            },
+        ));
+        for width in [60, 120] {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 35))?;
+            terminal.draw(|f| draw(f, &mut app))?;
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>();
+            assert!(rendered.contains("Activity | Build app"));
+            assert!(rendered.contains("succeeded"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cached_tab_navigation_preserves_selection_without_network() -> Result<()> {
+        let (_root, mut app) = fixture()?;
+        let target = app.settings.target(None, None)?;
+        app.pr_cache = Some((
+            target.clone(),
+            false,
+            vec![json!({"pullRequestId":1}), json!({"pullRequestId":2})],
+        ));
+        app.pipeline_cache = Some((target, vec![json!({"id":7})]));
+        app.activity_cache
+            .insert(app.activity_key(7)?, vec![json!({"id":42})]);
+        app.load_prs()?;
+        app.selection.select(Some(1));
+        app.handle(key(KeyCode::Tab))?;
+        assert!(matches!(app.screen, Screen::Pipelines(_)));
+        assert_eq!(app.activity.len(), 1);
+        assert!(app.task.is_none());
+        app.handle(key(KeyCode::Tab))?;
+        assert_eq!(app.selection.selected(), Some(1));
+        assert!(app.task.is_none());
+        // Another project must never reuse these cached results.
+        app.settings.project = Some("different".into());
+        assert!(app.load_prs().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn project_picker_highlights_current_project() -> Result<()> {
+        let (_root, mut app) = fixture()?;
+        app.setup_org = app.settings.organization.clone();
+        app.receive((
+            app.generation,
+            Message::Projects(vec![json!({"name":"another"}), json!({"name":"project"})]),
+        ));
+        assert_eq!(app.selection.selected(), Some(1));
+        Ok(())
+    }
+
     #[test]
     fn pat_setup_asks_for_organization_and_a_masked_token_not_app_registration() -> Result<()> {
         let (_root, mut app) = fixture()?;

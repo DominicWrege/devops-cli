@@ -2,6 +2,16 @@
 
 No live Azure DevOps writes have been run by the implementation session. Use an explicitly approved disposable repository, PR, and pipeline for these checks.
 
+## 0.3.1 verification
+
+Windows automated checks cover 72 Rust tests, formatting, Clippy, packaging, and
+the release build. A Windows terminal check verified starred PAT entry,
+Backspace, cancellation, and terminal restoration. A live read-only check against
+sncom returned HTTP 200 with valid project-list JSON, both with and without redirect
+suppression. The patched CLI login succeeded with the supplied environment PAT;
+this did not reproduce the original HTTP 302 or verify every tenant operation.
+Local WSL testing was skipped at the user's request; Linux remains covered by CI.
+
 ## 0.3.0 verification
 
 Local Windows checks on 2026-10-28 cover formatting, Clippy, 65 Rust tests,

@@ -9,7 +9,7 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.3.0
+mise use -g github:DominicWrege/devops-cli@0.3.1
 devops login
 ```
 
@@ -67,6 +67,22 @@ Entra tokens renew silently when your session and tenant policy allow it. If a c
 This is an early release. Live Windows/WSL sign-in and tenant workflows still need validation.
 
 ## Use the TUI
+
+The TUI remembers your selected organization and project and opens directly to
+pull requests on subsequent launches. If you are signed in but have no selected
+project, it opens the project picker without asking for your token again.
+Press `P` to change the current project; selection saves it for CLI commands too.
+Use `1` / `2` or `Tab` to switch between pull requests and pipelines. Wide terminals
+show a preview beside the pull request list. `Enter` opens the selected item.
+The Pipelines view shows recent activity for the selected pipeline beside the list,
+or below it on narrow terminals. Up/Down changes the pipeline; Enter opens its
+runs so you can select one to follow. F5 refreshes activity. Tab and Shift+Tab
+switch views even while reads are loading; submitted writes finish first.
+Loaded lists and activity stay cached for this TUI session, so returning to a tab
+is immediate and keeps your selected row. Press F5 for fresh data. Activity loads
+after a short pause when scrolling past pipelines. Run icons distinguish running,
+succeeded, failed, and canceled runs; the text status remains visible.
+
 
 ```sh
 devops tui

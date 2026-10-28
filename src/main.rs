@@ -17,6 +17,7 @@ mod config;
 mod error;
 mod output;
 mod pipeline;
+mod secret_prompt;
 mod service;
 mod tui;
 
@@ -268,7 +269,7 @@ fn prompt_pat() -> Result<String> {
     if !std::io::stdin().is_terminal() {
         return Err(auth::pat::required());
     }
-    let token = rpassword::prompt_password("Azure DevOps personal access token: ")
+    let token = secret_prompt::read("Azure DevOps personal access token: ")
         .map_err(|_| anyhow::anyhow!("Cannot read personal access token from the terminal"))?;
     auth::pat::validate(&token)?;
     Ok(token)
