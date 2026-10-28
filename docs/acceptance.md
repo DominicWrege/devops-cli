@@ -2,6 +2,14 @@
 
 No live Azure DevOps writes have been run by the implementation session. Use an explicitly approved disposable repository, PR, and pipeline for these checks.
 
+## 0.3.2 verification
+
+Windows verification passes 76 Rust tests, five release-packaging tests, formatting,
+Clippy, and the release build. New tests cover grouped pipeline table selection,
+project-wide run query limits and ordering, selection preservation when new runs
+arrive, and the Settings menu. Recent runs refresh every 30 seconds while visible.
+Local WSL testing remains skipped at the user's request; release CI checks Linux.
+
 ## 0.3.1 verification
 
 Windows automated checks cover 72 Rust tests, formatting, Clippy, packaging, and

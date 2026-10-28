@@ -9,7 +9,7 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.3.1
+mise use -g github:DominicWrege/devops-cli@0.3.2
 devops login
 ```
 
@@ -60,7 +60,7 @@ devops login --org my-org --project my-project --client-id APP_UUID
 
 The organization is the first path segment of your Azure DevOps URL: `https://dev.azure.com/my-org/my-project`. For Entra sign-in, ask your tenant administrator for a public-client app registration with Azure DevOps delegated `user_impersonation` permission and consent. Enable public-client flows for device-code login. Windows also needs the broker redirect URI `ms-appx-web://Microsoft.AAD.BrokerPlugin/CLIENT_ID`, with your app ID in place of `CLIENT_ID`. Tenant policy may block device-code login.
 
-`devops tui` offers the same setup interactively. Press `s` there to reopen it later.
+`devops tui` offers the same setup interactively. Press `s` there and select Account to reopen sign-in later.
 
 Entra tokens renew silently when your session and tenant policy allow it. If a command exits with code `3`, run `devops login --entra` again (or `devops login` to replace a PAT). Windows and WSL keep separate sessions.
 
@@ -71,9 +71,15 @@ This is an early release. Live Windows/WSL sign-in and tenant workflows still ne
 The TUI remembers your selected organization and project and opens directly to
 pull requests on subsequent launches. If you are signed in but have no selected
 project, it opens the project picker without asking for your token again.
-Press `P` to change the current project; selection saves it for CLI commands too.
+Press `s` for Settings, then choose Current project or Account. Project selection
+is remembered for CLI commands too.
 Use `1` / `2` or `Tab` to switch between pull requests and pipelines. Wide terminals
 show a preview beside the pull request list. `Enter` opens the selected item.
+In Pipelines, press `r` for the project-wide recent-runs feed. It lists the latest
+50 runs from YAML pipelines and refreshes every 30 seconds while visible, keeping
+your selected run. Enter opens its timeline and logs; `a` returns to all pipelines.
+
+The pipeline table groups rows by folder and sorts names within each folder.
 The Pipelines view shows recent activity for the selected pipeline beside the list,
 or below it on narrow terminals. Up/Down changes the pipeline; Enter opens its
 runs so you can select one to follow. F5 refreshes activity. Tab and Shift+Tab
@@ -93,7 +99,7 @@ devops tui
 | `p` | Pull requests |
 | `i` | Assigned reviews needing attention |
 | `l` | YAML pipelines |
-| `s` | Sign-in and setup |
+| `s` | Settings: current project and account |
 | `q` | Quit |
 | Arrow keys, Enter | Select and open an item |
 | `F5` | Refresh lists and details |

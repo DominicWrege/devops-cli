@@ -596,6 +596,23 @@ impl Service {
         );
         Ok(pipeline)
     }
+    pub async fn recent_runs(&self, pipelines: &[Value]) -> Result<Vec<Value>> {
+        let definitions = pipelines
+            .iter()
+            .map(|p| response_id(p, "id").map(|id| id.to_string()))
+            .collect::<Result<Vec<_>>>()?;
+        if definitions.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(rows(&call!(
+            self.build(None)
+                .builds_client()
+                .list(self.org(), self.project())
+                .definitions(definitions.join(","))
+                .top(50)
+                .query_order(ado::build::models::BuildQueryOrder::QueueTimeDescending)
+        )?))
+    }
     pub async fn runs(&self, id: i32) -> Result<Vec<Value>> {
         self.require_yaml(id).await?;
         Ok(rows(&call!(self.pipelines(None).runs_client().list(
@@ -1008,6 +1025,28 @@ mod tests {
         Mock::given(method("POST")).and(path("/org/project/_apis/git/repositories")).and(header("authorization","Bearer fixture-access-token"))
             .and(body_json(json!({"name":"demo"}))).respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"repo","name":"demo","remoteUrl":"https://dev.azure.com/org/project/_git/demo"}))).expect(1).mount(&server).await;
         assert_eq!(api(&server)?.repo_create("demo").await?["name"], "demo");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recent_runs_are_bounded_and_ordered_for_selected_definitions() -> Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/org/project/_apis/build/builds"))
+            .and(query_param("definitions", "2,7"))
+            .and(query_param("$top", "50"))
+            .and(query_param("queryOrder", "queueTimeDescending"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[{"id":42}]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert_eq!(
+            api(&server)?
+                .recent_runs(&[json!({"id":2}), json!({"id":7})])
+                .await?[0]["id"],
+            42
+        );
+        assert!(api(&server)?.recent_runs(&[]).await?.is_empty());
         Ok(())
     }
 

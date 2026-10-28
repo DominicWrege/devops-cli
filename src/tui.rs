@@ -19,7 +19,9 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{
+        Block, Borders, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
+    },
 };
 use serde_json::Value;
 use std::{
@@ -63,6 +65,7 @@ enum Screen {
     Prs(Vec<Value>),
     Pr { value: Value, detail: String },
     Pipelines(Vec<Value>),
+    Recent(Vec<Value>),
     Runs { pipeline: i32, values: Vec<Value> },
     Watch(Box<Viewer>),
 }
@@ -76,6 +79,7 @@ enum Message {
         detail: String,
     },
     Pipelines(Vec<Value>),
+    Recent(Vec<Value>),
     Runs {
         pipeline: i32,
         values: Vec<Value>,
@@ -216,6 +220,7 @@ struct App {
     detail_scroll: u16,
     form: Option<Form>,
     confirm: Option<PrCommand>,
+    settings_menu: Option<usize>,
     status: String,
     task: Option<JoinHandle<()>>,
     writing: bool,
@@ -227,6 +232,7 @@ struct App {
     pr_selection: usize,
     pipeline_selection: usize,
     activity_due: Option<Instant>,
+    recent_due: Instant,
     tx: mpsc::UnboundedSender<(u64, Message)>,
     generation: u64,
     poll_at: Instant,
@@ -257,6 +263,7 @@ impl App {
             detail_scroll: 0,
             form: None,
             confirm: None,
+            settings_menu: None,
             status: String::new(),
             task: None,
             writing: false,
@@ -268,6 +275,7 @@ impl App {
             pr_selection: 0,
             pipeline_selection: 0,
             activity_due: None,
+            recent_due: Instant::now(),
             tx,
             generation: 0,
             poll_at: Instant::now(),
@@ -465,6 +473,29 @@ impl App {
         });
         Ok(())
     }
+    fn load_recent(&mut self) -> Result<()> {
+        let api = self.api()?;
+        let target = self
+            .settings
+            .target(self.org.as_deref(), self.project.as_deref())?;
+        let pipelines = self
+            .pipeline_cache
+            .as_ref()
+            .filter(|(cached, _)| *cached == target)
+            .map(|(_, values)| values.clone());
+        if !matches!(self.screen, Screen::Recent(_)) {
+            self.set_screen(Screen::Recent(Vec::new()));
+        }
+        self.recent_due = Instant::now() + Duration::from_secs(30);
+        self.launch(async move {
+            let pipelines = match pipelines {
+                Some(values) => values,
+                None => api.pipeline_list().await?,
+            };
+            Ok(Message::Recent(api.recent_runs(&pipelines).await?))
+        });
+        Ok(())
+    }
     fn load_pipelines(&mut self) -> Result<()> {
         let target = self
             .settings
@@ -600,6 +631,19 @@ impl App {
                 self.set_screen(Screen::Projects(items));
                 self.selection.select(Some(selected));
             }
+            Message::Recent(items) => {
+                if let Screen::Recent(previous) = &self.screen {
+                    let selected_id = previous
+                        .get(self.selection.selected().unwrap_or(0))
+                        .and_then(|v| v["id"].as_i64());
+                    let selected = selected_id
+                        .and_then(|id| items.iter().position(|v| v["id"].as_i64() == Some(id)))
+                        .unwrap_or(0);
+                    self.screen = Screen::Recent(items);
+                    self.selection.select(Some(selected));
+                    self.status = "Updated just now. Auto-refresh every 30 seconds.".into();
+                }
+            }
             Message::Prs(items) => {
                 if let Ok(target) = self
                     .settings
@@ -610,7 +654,8 @@ impl App {
                 self.set_screen(Screen::Prs(items));
             }
             Message::Pr { value, detail } => self.set_screen(Screen::Pr { value, detail }),
-            Message::Pipelines(items) => {
+            Message::Pipelines(mut items) => {
+                sort_pipelines(&mut items);
                 if let Ok(target) = self
                     .settings
                     .target(self.org.as_deref(), self.project.as_deref())
@@ -764,7 +809,7 @@ impl App {
                     self.load_runs(response_id(item, "id")?)?;
                 }
             }
-            Screen::Runs { values, .. } => {
+            Screen::Recent(values) | Screen::Runs { values, .. } => {
                 if let Some(item) = values.get(index) {
                     let run = response_id(item, "id")?;
                     self.set_screen(Screen::Watch(Box::new(Viewer::new(run))));
@@ -843,6 +888,7 @@ impl App {
         self.pipeline_cache = None;
         self.activity_cache.clear();
         match &self.screen {
+            Screen::Recent(_) => self.load_recent()?,
             Screen::Prs(_) => self.load_prs()?,
             Screen::Pr { value, .. } => self.load_pr(response_id(value, "pullRequestId")?)?,
             Screen::Pipelines(_) => self.load_pipelines()?,
@@ -901,6 +947,34 @@ impl App {
             }
             return Ok(false);
         }
+        if let Some(selected) = self.settings_menu {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('s') => self.settings_menu = None,
+                KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Tab
+                | KeyCode::BackTab
+                | KeyCode::Char('j' | 'k') => {
+                    self.settings_menu = Some(1 - selected);
+                }
+                KeyCode::Enter => {
+                    self.settings_menu = None;
+                    if selected == 0 {
+                        self.choose_project()?;
+                    } else {
+                        self.identity_form();
+                    }
+                }
+                KeyCode::Char('q') => return Ok(true),
+                _ => {}
+            }
+            return Ok(false);
+        }
+        if key.code == KeyCode::Char('s') && !self.writing {
+            self.cancel_task();
+            self.settings_menu = Some(0);
+            return Ok(false);
+        }
         if key.code == KeyCode::Char('q') {
             return Ok(true);
         }
@@ -914,6 +988,7 @@ impl App {
                 Screen::Prs(_)
                     | Screen::Pr { .. }
                     | Screen::Pipelines(_)
+                    | Screen::Recent(_)
                     | Screen::Runs { .. }
                     | Screen::Watch(_)
             )
@@ -931,7 +1006,12 @@ impl App {
             return Ok(false);
         }
         // Keep navigation responsive while polling, but don't overlap writes or setup.
-        if self.task.is_some() && !matches!(self.screen, Screen::Watch(_) | Screen::Pipelines(_)) {
+        if self.task.is_some()
+            && !matches!(
+                self.screen,
+                Screen::Watch(_) | Screen::Pipelines(_) | Screen::Recent(_)
+            )
+        {
             return Ok(false);
         }
         if let Screen::Watch(viewer) = &mut self.screen {
@@ -951,7 +1031,14 @@ impl App {
             return Ok(false);
         }
         match key.code {
-            KeyCode::Char('P') => self.choose_project()?,
+            KeyCode::Char('r')
+                if matches!(self.screen, Screen::Pipelines(_) | Screen::Recent(_)) =>
+            {
+                self.load_recent()?
+            }
+            KeyCode::Char('a') if matches!(self.screen, Screen::Recent(_)) => {
+                self.load_pipelines()?
+            }
             KeyCode::Char('1') => {
                 self.attention = false;
                 self.load_prs()?;
@@ -975,7 +1062,6 @@ impl App {
                 self.load_prs()?;
             }
             KeyCode::Char('l') => self.load_pipelines()?,
-            KeyCode::Char('s') => self.identity_form(),
             KeyCode::F(5) => self.refresh()?,
             KeyCode::Enter => self.enter()?,
             KeyCode::Up | KeyCode::Char('k') => {
@@ -988,7 +1074,8 @@ impl App {
                     Screen::Organizations(v)
                     | Screen::Projects(v)
                     | Screen::Prs(v)
-                    | Screen::Pipelines(v) => v.len(),
+                    | Screen::Pipelines(v)
+                    | Screen::Recent(v) => v.len(),
                     Screen::Runs { values, .. } => values.len(),
                     _ => 0,
                 };
@@ -1061,6 +1148,15 @@ pub async fn run(
             app.status = error.to_string();
             app.poll_at = Instant::now() + Duration::from_secs(2);
         }
+        if matches!(app.screen, Screen::Recent(_))
+            && app.task.is_none()
+            && app.settings_menu.is_none()
+            && Instant::now() >= app.recent_due
+            && let Err(error) = app.load_recent()
+        {
+            app.status = error.to_string();
+            app.recent_due = Instant::now() + Duration::from_secs(30);
+        }
         if app.activity_due.is_some_and(|due| Instant::now() >= due) {
             app.activity_due = None;
             if let Err(error) = app.load_activity() {
@@ -1114,14 +1210,16 @@ fn draw(frame: &mut Frame, app: &mut App) {
                     " 2 ▶ Pipelines ",
                     if matches!(
                         app.screen,
-                        Screen::Pipelines(_) | Screen::Runs { .. } | Screen::Watch(_)
+                        Screen::Pipelines(_)
+                            | Screen::Recent(_)
+                            | Screen::Runs { .. }
+                            | Screen::Watch(_)
                     ) {
                         Style::default().bg(Color::Cyan).fg(Color::Black).bold()
                     } else {
                         Style::default()
                     },
                 ),
-                Span::raw("   P ◇ Project   s Account"),
             ]),
         ])
         .block(Block::default().borders(Borders::BOTTOM)),
@@ -1129,8 +1227,8 @@ fn draw(frame: &mut Frame, app: &mut App) {
     );
     let help = match &mut app.screen {
         Screen::Home => {
-            frame.render_widget(Paragraph::new("Your project is remembered between sessions.\n\n1  Pull requests     Review and manage your team's work\n2  Pipelines         Browse runs and follow logs\nP  Switch project    Choose and remember a different project\ns  Account           Sign in or replace your token\nq  Quit\n\nUse Tab to switch between pull requests and pipelines.\nSelect a row with Up/Down or j/k; press Enter to open it.").block(Block::bordered().title("Home")),layout[1]);
-            "p: PRs   i: assigned reviews   l: pipelines   s: setup   q: quit"
+            frame.render_widget(Paragraph::new("Your project is remembered between sessions.\n\n1  Pull requests     Review and manage your team's work\n2  Pipelines         Browse runs and follow logs\ns  Settings          Current project and account\nq  Quit\n\nUse Tab to switch between pull requests and pipelines.\nSelect a row with Up/Down or j/k; press Enter to open it.").block(Block::bordered().title("Home")),layout[1]);
+            "p: PRs   i: assigned reviews   l: pipelines   s: settings   q: quit"
         }
         Screen::Organizations(items) => {
             draw_list(
@@ -1261,17 +1359,73 @@ fn draw(frame: &mut Frame, app: &mut App) {
                     .block(Block::bordered().title(output::cell(&format!("Activity | {name}")))),
                 panes[1],
             );
-            draw_list(
+            let mut previous_folder = String::new();
+            let rows = items
+                .iter()
+                .map(|v| {
+                    let folder = pipeline_folder(v);
+                    let group = if folder != previous_folder {
+                        folder.clone()
+                    } else {
+                        String::new()
+                    };
+                    previous_folder = folder;
+                    Row::new(vec![
+                        output::cell(&group),
+                        output::cell(text(v, "name")),
+                        scalar(&v["id"]),
+                    ])
+                })
+                .collect();
+            draw_table(
                 frame,
                 panes[0],
-                "YAML pipelines",
-                items
-                    .iter()
-                    .map(|v| format!("{}  {}", scalar(&v["id"]), text(v, "name")))
-                    .collect(),
+                "Pipelines by folder",
+                ["Folder", "Pipeline", "ID"].to_vec(),
+                rows,
+                vec![
+                    Constraint::Percentage(30),
+                    Constraint::Min(12),
+                    Constraint::Length(7),
+                ],
                 &mut app.selection,
             );
-            "Up/Down: pipeline   Enter: open runs   Tab: pull requests   F5: refresh"
+            "r: recent runs (30s refresh)   Up/Down: pipeline   Enter: runs   F5: refresh"
+        }
+        Screen::Recent(items) => {
+            let rows = items
+                .iter()
+                .map(|run| {
+                    let status = if text(run, "result").is_empty() {
+                        text(run, "status")
+                    } else {
+                        text(run, "result")
+                    };
+                    Row::new(vec![
+                        format!("{} {}", run_icon(run), output::cell(status)),
+                        output::cell(text(&run["definition"], "name")),
+                        output::cell(text(run, "buildNumber")),
+                        output::cell(text(run, "sourceBranch").trim_start_matches("refs/heads/")),
+                        output::cell(text(run, "queueTime")),
+                    ])
+                })
+                .collect();
+            draw_table(
+                frame,
+                layout[1],
+                "Recent runs | newest first | refresh 30s",
+                vec!["Status", "Pipeline", "Run", "Branch", "Queued"],
+                rows,
+                vec![
+                    Constraint::Length(13),
+                    Constraint::Percentage(30),
+                    Constraint::Length(16),
+                    Constraint::Percentage(20),
+                    Constraint::Min(10),
+                ],
+                &mut app.selection,
+            );
+            "Up/Down: run   Enter: timeline and logs   a: all pipelines   F5: refresh"
         }
         Screen::Runs { values, .. } => {
             draw_list(
@@ -1300,11 +1454,33 @@ fn draw(frame: &mut Frame, app: &mut App) {
         }
     };
     frame.render_widget(
-        Paragraph::new(output::clean(&format!("{help}\n{}", app.status)))
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::TOP)),
+        Paragraph::new(output::clean(&format!(
+            "{help}   s: settings\n{}",
+            app.status
+        )))
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::TOP)),
         layout[2],
     );
+    if let Some(selected) = app.settings_menu {
+        let popup = center(area, 65, 45);
+        frame.render_widget(Clear, popup);
+        let rows = vec![
+            format!(
+                "Current project   {}",
+                app.settings.project.as_deref().unwrap_or("Not selected")
+            ),
+            "Account           Sign in or replace token".into(),
+        ];
+        let mut state = ListState::default().with_selected(Some(selected));
+        draw_list(
+            frame,
+            popup,
+            "Settings | Enter: open  Esc: close",
+            rows,
+            &mut state,
+        );
+    }
     if let Some(form) = &app.form {
         let popup = center(area, 90, 85);
         frame.render_widget(Clear, popup);
@@ -1363,8 +1539,67 @@ fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
+fn pipeline_folder(value: &Value) -> String {
+    let folder = text(value, "folder").trim_matches(['/', '\\']);
+    if folder.is_empty() {
+        "Root".into()
+    } else {
+        folder.replace('\\', "/")
+    }
+}
+
+fn sort_pipelines(items: &mut [Value]) {
+    items.sort_by_key(|v| {
+        (
+            pipeline_folder(v).to_lowercase(),
+            text(v, "name").to_lowercase(),
+        )
+    });
+}
+
+fn draw_table(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    headers: Vec<&str>,
+    rows: Vec<Row<'static>>,
+    widths: Vec<Constraint>,
+    selection: &mut ListState,
+) {
+    let mut state = TableState::default()
+        .with_offset(selection.offset())
+        .with_selected(selection.selected());
+    let rows = if rows.is_empty() {
+        vec![Row::new(vec!["No items"])]
+    } else {
+        rows
+    };
+    frame.render_stateful_widget(
+        Table::new(rows, widths)
+            .header(
+                Row::new(headers)
+                    .style(Style::default().fg(Color::Cyan).bold())
+                    .bottom_margin(1),
+            )
+            .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::Cyan).bold())
+            .highlight_symbol("> ")
+            .column_spacing(2)
+            .block(Block::bordered().title(title)),
+        area,
+        &mut state,
+    );
+    *selection.offset_mut() = state.offset();
+}
+
 fn run_icon(run: &Value) -> &'static str {
-    match (text(run, "state"), text(run, "result")) {
+    match (
+        if text(run, "state").is_empty() {
+            text(run, "status")
+        } else {
+            text(run, "state")
+        },
+        text(run, "result"),
+    ) {
         (_, "succeeded") => "✓",
         (_, "failed") => "✗",
         (_, "canceled") => "■",
@@ -1385,7 +1620,7 @@ fn draw_list(
     } else {
         items
             .into_iter()
-            .map(|s| ListItem::new(output::cell(&s)))
+            .map(|s| ListItem::new(output::clean(&s)))
             .collect()
     };
     frame.render_stateful_widget(
@@ -1629,6 +1864,74 @@ mod tests {
         // Another project must never reuse these cached results.
         app.settings.project = Some("different".into());
         assert!(app.load_prs().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn settings_groups_project_and_account_without_changing_main_navigation() -> Result<()> {
+        let (_root, mut app) = fixture()?;
+        app.screen = Screen::Prs(vec![]);
+        app.handle(key(KeyCode::Char('s')))?;
+        assert_eq!(app.settings_menu, Some(0));
+        app.handle(key(KeyCode::Tab))?;
+        assert_eq!(app.settings_menu, Some(1));
+        assert!(matches!(app.screen, Screen::Prs(_)));
+        app.handle(key(KeyCode::Enter))?;
+        assert!(app.settings_menu.is_none());
+        assert!(app.form.is_some());
+        app.handle(key(KeyCode::Esc))?;
+        app.handle(key(KeyCode::Char('s')))?;
+        app.handle(key(KeyCode::Esc))?;
+        assert!(app.settings_menu.is_none());
+        assert!(matches!(app.screen, Screen::Prs(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn recent_refresh_keeps_selected_run_when_new_runs_arrive() -> Result<()> {
+        let (_root, mut app) = fixture()?;
+        app.screen = Screen::Recent(vec![json!({"id":42}), json!({"id":41})]);
+        app.selection.select(Some(1));
+        app.receive((
+            app.generation,
+            Message::Recent(vec![json!({"id":43}), json!({"id":42}), json!({"id":41})]),
+        ));
+        assert_eq!(app.selection.selected(), Some(2));
+        app.handle(key(KeyCode::Up))?;
+        assert_eq!(app.selection.selected(), Some(1));
+        app.enter()?;
+        assert!(matches!(&app.screen, Screen::Watch(viewer) if viewer.run_id == 42));
+        Ok(())
+    }
+
+    #[test]
+    fn pipeline_table_groups_folders_and_keeps_pipeline_rows_selectable() -> Result<()> {
+        let (_root, mut app) = fixture()?;
+        let mut items = vec![
+            json!({"id":3,"name":"Z","folder":"B"}),
+            json!({"id":2,"name":"Beta","folder":"A"}),
+            json!({"id":1,"name":"Alpha","folder":"A"}),
+        ];
+        sort_pipelines(&mut items);
+        assert_eq!(
+            items.iter().map(|v| v["id"].as_i64()).collect::<Vec<_>>(),
+            vec![Some(1), Some(2), Some(3)]
+        );
+        assert_eq!(pipeline_folder(&json!({"folder":""})), "Root");
+        app.screen = Screen::Pipelines(items);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 35))?;
+        terminal.draw(|f| draw(f, &mut app))?;
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Pipelines by folder"));
+        assert!(rendered.contains("Alpha"));
+        app.handle(key(KeyCode::Down))?;
+        assert_eq!(app.selection.selected(), Some(1));
         Ok(())
     }
 
