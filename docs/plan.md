@@ -4,6 +4,8 @@ Status: initial implementation in place. The user authorized implementation on 2
 
 ## Confirmed direction
 
+- Latest authentication decision: use an interactive, hidden PAT prompt by default for now; keep Entra as an explicit alternative. See [ADR 0012](adr/0012-personal-access-token-authentication.md). The WAM/device-code requirements below apply to Entra mode.
+- Next requested feature: repository autodetection. It is deferred to the next implementation pass; organization/project selection remains explicit in this change.
 - Build both a command-line interface and a terminal user interface in Rust.
 - Build the TUI for personal daily use by the project owner and the CLI for agents. Team distribution is not a confirmed requirement.
 - Support agents running natively on Windows and inside WSL on the same PC. Remote hosts and CI are not first-release requirements. Linux/WSL uses its own device-code session rather than sharing the Windows WAM session.

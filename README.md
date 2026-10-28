@@ -9,7 +9,7 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.2.2
+mise use -g github:DominicWrege/devops-cli@0.3.0
 devops login
 ```
 
@@ -22,11 +22,35 @@ Install separately on Windows and inside WSL. No ARM64 or macOS builds are provi
 
 ## Sign in
 
+Sign-in uses a personal access token by default (no Entra app registration). Entra sign-in remains optional. Azure CLI is not required for either option.
+
+### Personal access token (PAT)
+
+In Azure DevOps, open **User settings â†’ Personal access tokens â†’ New Token**. Select your organization, a short expiry, and only the scopes you need. Include **Project and Team: Read** for login and project selection, plus appropriate **Code** scopes for PRs/repositories and **Build** scopes for pipelines. Your organization must allow PATs.
+
+Run login and enter your token at the hidden prompt:
+
 ```sh
 devops login
+# Or supply the target up front; the token is still prompted for:
+devops login --org my-org --project my-project
 ```
 
-The first run asks for your organization and Entra public-client app ID. It discovers the tenant from the organization, then completes sign-in. Later runs reuse the saved values. Windows uses your Windows account through WAM. Linux/WSL shows a device code and a URL to open.
+Login verifies project-listing access, then saves the token separately from settings for subsequent CLI/TUI commands. On Windows the saved token is encrypted for your Windows user with DPAPI. Linux/WSL uses an owner-only file; see [storage](#defaults-and-overrides). Tokens are saved per organization, so overriding `--org` never silently uses another organization's saved PAT.
+
+`devops tui` also asks for the organization and a masked token, then lets you select a project. A blank token field reuses the saved token. Organization/project selection is explicit for now; repository autodetection is the next feature, not implemented yet.
+
+For scripts, `DEVOPS_PAT` is an optional override that takes precedence over saved credentials and is never saved by login. Set it through a secret manager or hidden shell input, not a literal token in shell history. Environment variables are available to child processes; do not log or share them. Never pass the token as a command-line argument. Non-interactive commands never prompt for tokens.
+
+PATs do not renew automatically. Run `devops login` again to enter a replacement when the token expires or is revoked. To save defaults without signing in, use `devops init --org my-org --project my-project` (`--pat` is optional). Your organization must allow PATs.
+
+### Microsoft Entra
+
+```sh
+devops login --entra
+```
+
+With `--entra`, the first run asks for your organization and Entra public-client app ID. It discovers the tenant from the organization, then completes sign-in. Later Entra logins reuse the saved values. Windows uses your Windows account through WAM. Linux/WSL shows a device code and a URL to open. Unset `DEVOPS_PAT` before switching to Entra.
 
 Pass the values up front instead:
 
@@ -34,11 +58,11 @@ Pass the values up front instead:
 devops login --org my-org --project my-project --client-id APP_UUID
 ```
 
-The organization is the first path segment of your Azure DevOps URL: `https://dev.azure.com/my-org/my-project`. The app ID is the one Azure-specific value you must supply: ask your tenant administrator for a public-client app registration with Azure DevOps delegated `user_impersonation` permission and consent. Enable public-client flows for device-code login. Windows also needs the broker redirect URI `ms-appx-web://Microsoft.AAD.BrokerPlugin/CLIENT_ID`, with your app ID in place of `CLIENT_ID`. Tenant policy may block device-code login.
+The organization is the first path segment of your Azure DevOps URL: `https://dev.azure.com/my-org/my-project`. For Entra sign-in, ask your tenant administrator for a public-client app registration with Azure DevOps delegated `user_impersonation` permission and consent. Enable public-client flows for device-code login. Windows also needs the broker redirect URI `ms-appx-web://Microsoft.AAD.BrokerPlugin/CLIENT_ID`, with your app ID in place of `CLIENT_ID`. Tenant policy may block device-code login.
 
 `devops tui` offers the same setup interactively. Press `s` there to reopen it later.
 
-Tokens renew silently when your session and tenant policy allow it. If a command exits with code `3`, run `devops login` again. Windows and WSL keep separate sessions.
+Entra tokens renew silently when your session and tenant policy allow it. If a command exits with code `3`, run `devops login --entra` again (or `devops login` to replace a PAT). Windows and WSL keep separate sessions.
 
 This is an early release. Live Windows/WSL sign-in and tenant workflows still need validation.
 
@@ -144,7 +168,9 @@ devops login
 
 Settings live in `~/.config/devops/settings.json`. On Windows that is `%USERPROFILE%\.config\devops\settings.json`, not AppData.
 
-Linux/WSL stores an unencrypted session in `~/.config/devops/auth.json`, readable by your user and root. The directory is `0700` and the file is `0600`. Do not share this file. Windows stores account metadata in `wam-account.json`; WAM manages the credentials. `settings.json` never contains tokens.
+PATs entered interactively are saved in `~/.config/devops/pat-ORGANIZATION.json`, separate from settings. Windows encrypts the token with current-user DPAPI. Linux/WSL stores it unencrypted with directory mode `0700` and file mode `0600`, readable by your user and root. Do not share these files. `DEVOPS_PAT` overrides are never saved.
+
+For Entra sign-in, Linux/WSL stores an unencrypted session in `~/.config/devops/auth.json` with the same owner-only permissions. Windows stores account metadata in `wam-account.json`; WAM manages the credentials. `settings.json` never contains tokens.
 
 ### Writes and errors
 
@@ -163,4 +189,4 @@ Writes are not retried automatically. If a request fails or is interrupted, chec
 
 Use `devops --help` or `devops pr --help` for command options.
 
-[Development and releases](docs/development.md) · [Acceptance checklist](docs/acceptance.md)
+[Development and releases](docs/development.md) Â· [Acceptance checklist](docs/acceptance.md)

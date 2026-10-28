@@ -61,7 +61,13 @@ def package(version, target, binary, destination, root=Path(".")):
                         output.write(file, file.relative_to(stage.parent))
         else:
             with tarfile.open(archive, "w:gz") as output:
-                output.add(stage, arcname=name)
+                # Set archive permissions explicitly: Windows chmod cannot set Unix
+                # executable bits, even when building a Linux archive in tests.
+                def archive_mode(member):
+                    member.mode = 0o755 if member.isdir() or member.name == f"{name}/{executable}" else 0o644
+                    return member
+
+                output.add(stage, arcname=name, filter=archive_mode)
     with archive.open("rb") as source:
         digest = hashlib.file_digest(source, "sha256").hexdigest()
     archive.with_name(archive.name + ".sha256").write_text(

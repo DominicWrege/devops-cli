@@ -12,11 +12,26 @@ use std::{
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
+    #[serde(default = "legacy_auth")]
+    pub auth: AuthMethod,
     pub organization: Option<String>,
     pub project: Option<String>,
     pub project_id: Option<String>,
     pub tenant_id: Option<String>,
     pub client_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthMethod {
+    Entra,
+    #[default]
+    Pat,
+}
+
+// Settings written before authentication modes existed used Entra.
+fn legacy_auth() -> AuthMethod {
+    AuthMethod::Entra
 }
 
 #[derive(Clone, Debug)]
@@ -64,8 +79,12 @@ impl Store {
     }
     #[cfg(not(windows))]
     pub fn read_session<T: serde::de::DeserializeOwned>(&self) -> Result<Option<T>> {
+        self.read_private("auth.json")
+    }
+    #[cfg(not(windows))]
+    pub fn read_private<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
         self.prepare()?;
-        let path = self.root.join("auth.json");
+        let path = self.root.join(name);
         reject_symlink(&path)?;
         #[cfg(unix)]
         {
@@ -80,7 +99,7 @@ impl Store {
                 Err(e) => return Err(e.into()),
             }
         }
-        self.read("auth.json")
+        self.read(name)
     }
     pub fn save(&self, settings: &Settings) -> Result<()> {
         self.write("settings.json", settings)
@@ -202,6 +221,12 @@ pub fn organization(input: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn existing_settings_default_to_entra_authentication() -> Result<()> {
+        let settings: Settings = serde_json::from_str(r#"{"organization":"org"}"#)?;
+        assert_eq!(settings.auth, AuthMethod::Entra);
+        Ok(())
+    }
     #[test]
     fn overrides_never_change_defaults() -> Result<()> {
         let settings = Settings {

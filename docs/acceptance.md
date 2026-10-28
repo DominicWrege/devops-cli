@@ -2,6 +2,18 @@
 
 No live Azure DevOps writes have been run by the implementation session. Use an explicitly approved disposable repository, PR, and pipeline for these checks.
 
+## 0.3.0 verification
+
+Local Windows checks on 2026-10-28 cover formatting, Clippy, 65 Rust tests,
+release packaging tests, and the release build. PAT tests cover current-user
+DPAPI round trips, organization isolation, replacement, hidden TUI rendering,
+Basic authentication, and stable authorization error codes using mocks.
+
+Live PAT and Entra sign-in, WSL runtime behavior, and tenant operations remain
+manual acceptance checks. Local WSL automated tests could not start because its
+Cargo launcher could not find the underlying executable. Run CI on the release commit before tagging v0.3.0.
+The historical verification records below describe earlier revisions.
+
 ## Automated verification
 
 - macOS: the reviewed code passes 53 Rust tests, including device authorization polling, cache persistence, declined-login preservation, stale TUI responses, malformed response IDs, and token lifetime validation. Formatting, Clippy, and the release build pass. See [code review](code-review.md).
@@ -13,6 +25,8 @@ No live Azure DevOps writes have been run by the implementation session. Use an 
 
 ## Authentication and setup
 
+- PAT: run default `devops login --org <org> --project <project>` without environment variables or tenant/client IDs. Verify the hidden token prompt, successful project-listing validation, and subsequent use without reentering the token. Include Project and Team read plus operation-specific scopes. Confirm Windows cache files do not contain plaintext PATs; on Linux/WSL verify `0600` files and a `0700` directory.
+- PAT: enter/paste a token in the TUI and confirm it renders only masked characters. Select the organization's project without profile/organization discovery; verify reads and cancel behavior. Check the optional `DEVOPS_PAT` override is not saved, normal commands never prompt, expired/revoked PATs return exit code 3, and insufficient scopes return 4. No tokens may appear in output or settings.
 - Configure a tenant-owned public-client app with the Azure DevOps delegated permission, consent, public-client flows and Windows broker redirect URI.
 - On native Windows, run `devops login --org <org> --client-id <app-id>` and verify WAM account selection, consent, cancellation, and terminal restoration.
 - Verify tenant discovery from the organization, and check the fallback `--tenant-id` path.

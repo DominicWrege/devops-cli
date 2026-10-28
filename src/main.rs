@@ -23,7 +23,7 @@ mod tui;
 use anyhow::{Context, Result};
 use clap::Parser;
 use cli::{Cli, Command, PipelineCommand};
-use config::Store;
+use config::{AuthMethod, Store};
 use std::io::Write;
 
 #[tokio::main]
@@ -65,6 +65,8 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Login {
             tenant_id,
             client_id,
+            pat,
+            entra,
         } => {
             return login(
                 store,
@@ -73,22 +75,34 @@ async fn run(cli: Cli) -> Result<()> {
                 cli.project.as_deref(),
                 tenant_id.as_deref(),
                 client_id.as_deref(),
+                if !pat && (*entra || tenant_id.is_some() || client_id.is_some()) {
+                    AuthMethod::Entra
+                } else {
+                    AuthMethod::Pat
+                },
             )
             .await;
         }
         Command::Tui => return tui::run(store, settings, cli.org, cli.project).await,
         Command::Config => {
             return emit(&format!(
-                "Organization: {}\nProject: {}\nTenant ID: {}\nClient ID: {}",
+                "Organization: {}\nProject: {}\nTenant ID: {}\nClient ID: {}\nAuthentication: {}",
                 settings.organization.as_deref().unwrap_or(""),
                 settings.project.as_deref().unwrap_or(""),
                 settings.tenant_id.as_deref().unwrap_or(""),
-                settings.client_id.as_deref().unwrap_or("")
+                settings.client_id.as_deref().unwrap_or(""),
+                if auth::uses_pat(&settings) {
+                    "PAT"
+                } else {
+                    "Entra"
+                }
             ));
         }
         Command::Init {
             tenant_id,
             client_id,
+            pat,
+            entra,
         } => {
             if let Some(org) = &cli.org {
                 settings.organization = Some(config::organization(org)?);
@@ -104,13 +118,19 @@ async fn run(cli: Cli) -> Result<()> {
             if let Some(client) = client_id {
                 settings.client_id = Some(client.clone());
             }
+            if *entra || tenant_id.is_some() || client_id.is_some() {
+                settings.auth = AuthMethod::Entra;
+            }
+            if *pat || auth::uses_pat(&settings) {
+                settings.auth = AuthMethod::Pat;
+            }
             settings.target(None, None)?;
-            if settings.client_id.is_none() {
+            if settings.auth == AuthMethod::Entra && settings.client_id.is_none() {
                 return Err(error::invalid(
                     "Missing public-client application ID. Pass `--client-id`.",
                 ));
             }
-            if settings.tenant_id.is_some() {
+            if settings.auth == AuthMethod::Entra && settings.tenant_id.is_some() {
                 settings.identity()?;
             }
             store.save(&settings)?;
@@ -121,8 +141,11 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Repo { command } => command.validate()?,
     }
     let target = settings.target(cli.org.as_deref(), cli.project.as_deref())?;
-    let credential = auth::Credential::new(store, settings.clone())?;
-    credential.token().await?; // Authentication failures have a stable non-interactive exit code.
+    // Saved PATs belong to organizations, including when --org overrides the default.
+    let mut identity = settings.clone();
+    identity.organization = Some(target.organization.clone());
+    let credential = auth::Credential::new(store, identity)?;
+    credential.authenticate().await?; // Authentication failures have a stable non-interactive exit code.
     let api = service::Service::new(credential, target)?;
     let result = match cli.command {
         Command::Pr { command } => api.pr_action(&command).await?,
@@ -152,6 +175,7 @@ async fn login(
     project: Option<&str>,
     tenant_id: Option<&str>,
     client_id: Option<&str>,
+    method: AuthMethod,
 ) -> Result<()> {
     if let Some(org) = org {
         settings.organization = Some(config::organization(org)?);
@@ -167,10 +191,49 @@ async fn login(
     if let Some(client) = client_id {
         settings.client_id = Some(client.into());
     }
+    settings.auth = method;
+    if auth::uses_pat(&settings) {
+        settings.auth = AuthMethod::Pat;
+    }
     if settings.organization.is_none() {
         let value = prompt("Organization (name or https://dev.azure.com/NAME)", "--org")?;
         settings.organization = Some(config::organization(&value)?);
         settings.project_id = None;
+    }
+    if settings.auth == AuthMethod::Pat {
+        let environment = auth::pat::environment()?;
+        let persist = environment.is_none();
+        let token = match environment {
+            Some(token) => token,
+            None => prompt_pat()?,
+        };
+        let credential = auth::Credential::from_pat(token.clone())?;
+        let target = config::Target {
+            organization: settings
+                .organization
+                .clone()
+                .context("Login requires an organization")?,
+            project: String::new(),
+        };
+        service::Service::new(credential, target)?
+            .check_access()
+            .await?;
+        if persist {
+            auth::pat::save(
+                &store,
+                settings
+                    .organization
+                    .as_deref()
+                    .context("Missing organization")?,
+                &token,
+            )?;
+        }
+        store.save(&settings)?;
+        return emit(if persist {
+            "Signed in with PAT. Saved for subsequent commands."
+        } else {
+            "Signed in with PAT from DEVOPS_PAT. The environment override was not saved."
+        });
     }
     if settings.tenant_id.is_none() {
         let org = settings
@@ -198,6 +261,17 @@ async fn login(
     let token = token?;
     printed?;
     emit(&auth::summary(&settings, &token)?)
+}
+
+fn prompt_pat() -> Result<String> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return Err(auth::pat::required());
+    }
+    let token = rpassword::prompt_password("Azure DevOps personal access token: ")
+        .map_err(|_| anyhow::anyhow!("Cannot read personal access token from the terminal"))?;
+    auth::pat::validate(&token)?;
+    Ok(token)
 }
 
 fn prompt(label: &str, flag: &str) -> Result<String> {

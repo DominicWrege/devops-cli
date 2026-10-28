@@ -2,6 +2,8 @@
 
 Status: accepted.
 
+Extended by [ADR 0012](0012-personal-access-token-authentication.md), which makes interactive PAT authentication the default without app registration. The WAM/device-code decisions below still apply to optional Entra mode.
+
 ## Context
 
 The human user operates the TUI and agents operate a non-interactive CLI. The target is Azure DevOps Services. The user selected built-in Microsoft Entra sign-in rather than reusing Azure CLI login or supplying a PAT.

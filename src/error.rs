@@ -37,7 +37,7 @@ pub fn invalid(message: impl Into<String>) -> anyhow::Error {
 pub fn auth_required() -> anyhow::Error {
     Failure {
         code: 3,
-        message: "Sign-in required. Open `devops tui` and sign in.".into(),
+        message: "Sign-in required. Run `devops login` or open `devops tui` to enter a new token. For PAT authentication, check token expiry, organization access, and DEVOPS_PAT if set.".into(),
     }
     .into()
 }

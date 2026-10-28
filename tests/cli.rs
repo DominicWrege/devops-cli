@@ -5,7 +5,10 @@ use predicates::prelude::*;
 
 fn command(home: &std::path::Path) -> Command {
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("devops"));
-    command.env("HOME", home).env("USERPROFILE", home);
+    command
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env_remove("DEVOPS_PAT");
     command.timeout(std::time::Duration::from_secs(5));
     command
 }
@@ -115,6 +118,146 @@ fn invalid_repository_names_fail_before_authentication() -> anyhow::Result<()> {
             .code(2)
             .stdout("")
             .stderr(predicate::str::contains("Repository"));
+    }
+    Ok(())
+}
+
+#[test]
+fn pat_defaults_need_no_app_registration_and_never_store_the_token() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let secret = "fixture-personal-access-token";
+    command(home.path())
+        .env("DEVOPS_PAT", secret)
+        .args(["init", "--pat", "--org", "org", "--project", "project"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(secret).not())
+        .stderr(predicate::str::contains(secret).not());
+    let saved = std::fs::read_to_string(home.path().join(".config/devops/settings.json"))?;
+    let settings: serde_json::Value = serde_json::from_str(&saved)?;
+    assert_eq!(settings["auth"], "pat");
+    assert!(settings["tenant_id"].is_null());
+    assert!(settings["client_id"].is_null());
+    assert!(!saved.contains(secret));
+    command(home.path())
+        .env("DEVOPS_PAT", secret)
+        .arg("config")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Authentication: PAT"))
+        .stdout(predicate::str::contains(secret).not());
+    // PAT mode stays selected without the secret; it must not fall back to WAM/device login.
+    command(home.path())
+        .args(["pr", "list"])
+        .assert()
+        .code(3)
+        .stdout("")
+        .stderr(predicate::str::contains("DEVOPS_PAT"));
+    Ok(())
+}
+
+#[test]
+fn pat_login_rejects_missing_or_invalid_tokens_before_network_or_prompts() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    command(home.path())
+        .args(["login", "--pat", "--org", "org"])
+        .assert()
+        .code(3)
+        .stdout("")
+        .stderr(predicate::str::contains("DEVOPS_PAT"));
+    for secret in ["", "fixture secret", "fixture\nsecret", "é"] {
+        let assertion = command(home.path())
+            .env("DEVOPS_PAT", secret)
+            .args(["login", "--pat", "--org", "org"])
+            .assert()
+            .code(2)
+            .stdout("")
+            .stderr(predicate::str::contains("DEVOPS_PAT"));
+        if !secret.is_empty() {
+            assertion.stderr(predicate::str::contains(secret).not());
+        }
+    }
+    assert!(!home.path().join(".config/devops/settings.json").exists());
+    Ok(())
+}
+
+#[test]
+fn pat_environment_selects_pat_mode_without_a_flag() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    command(home.path())
+        .env("DEVOPS_PAT", "fixture-pat")
+        .args(["init", "--org", "org", "--project", "project"])
+        .assert()
+        .success();
+    command(home.path())
+        .arg("config")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Authentication: PAT"));
+    Ok(())
+}
+
+#[test]
+fn pat_defaults_can_be_saved_without_a_token_and_switched_back_to_entra() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    command(home.path())
+        .args(["init", "--pat", "--org", "org", "--project", "project"])
+        .assert()
+        .success();
+    command(home.path())
+        .args([
+            "init",
+            "--tenant-id",
+            "11111111-1111-1111-1111-111111111111",
+            "--client-id",
+            "22222222-2222-2222-2222-222222222222",
+        ])
+        .assert()
+        .success();
+    command(home.path())
+        .arg("config")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Authentication: Entra"));
+    Ok(())
+}
+
+#[test]
+fn default_login_requests_a_pat_not_an_app_registration() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    command(home.path())
+        .args(["login", "--org", "org"])
+        .write_stdin("fixture-secret-pat\n")
+        .assert()
+        .code(3)
+        .stdout("")
+        .stderr(predicate::str::contains("Personal access token required"))
+        .stderr(predicate::str::contains("app").not())
+        .stderr(predicate::str::contains("fixture-secret-pat").not());
+    // An explicit --pat flag is no longer required for new settings.
+    command(home.path())
+        .args(["init", "--org", "org", "--project", "project"])
+        .assert()
+        .success();
+    command(home.path())
+        .arg("config")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Authentication: PAT"));
+    Ok(())
+}
+
+#[test]
+fn pat_flag_conflicts_with_entra_parameters() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    for cmd in ["login", "init"] {
+        for flag in ["--client-id", "--tenant-id"] {
+            command(home.path())
+                .args([cmd, "--pat", flag, "11111111-1111-1111-1111-111111111111"])
+                .assert()
+                .code(2)
+                .stderr(predicate::str::contains("cannot be used with"));
+        }
     }
     Ok(())
 }

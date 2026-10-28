@@ -1,12 +1,16 @@
-use crate::config::{Settings, Store};
+use crate::config::{AuthMethod, Settings, Store};
 use anyhow::Result;
 use azure_core::credentials::{AccessToken, TokenCredential, TokenRequestOptions};
 use std::sync::Arc;
 
 #[cfg(not(windows))]
 mod device;
+pub mod pat;
 #[cfg(windows)]
-#[allow(unsafe_code)] // Native WAM interop is the only audited FFI boundary.
+#[allow(unsafe_code)] // Audited DPAPI buffer ownership, isolated from application logic.
+mod protect;
+#[cfg(windows)]
+#[allow(unsafe_code)] // Audited native WAM interop.
 mod wam;
 
 #[cfg(windows)]
@@ -14,17 +18,73 @@ pub const RESOURCE: &str = "499b84ac-1321-427f-aa17-267ca6975798";
 pub const SCOPE: &str = "499b84ac-1321-427f-aa17-267ca6975798/.default";
 
 pub struct Credential {
-    store: Store,
-    settings: Settings,
-    #[cfg(windows)]
-    cached: tokio::sync::Mutex<Option<AccessToken>>,
+    sdk: azure_devops_rust_api::Credential,
+    entra: Option<Arc<EntraCredential>>,
 }
+
+// A present environment override selects PAT even when empty; never fall back silently.
+pub fn uses_pat(settings: &Settings) -> bool {
+    settings.auth == AuthMethod::Pat || std::env::var_os("DEVOPS_PAT").is_some()
+}
+
 impl std::fmt::Debug for Credential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("DevOpsCredential { .. }")
     }
 }
+
 impl Credential {
+    pub fn new(store: Store, settings: Settings) -> Result<Arc<Self>> {
+        if uses_pat(&settings) {
+            let token = match pat::environment()? {
+                Some(token) => Some(token),
+                None => match settings.organization.as_deref() {
+                    Some(org) => pat::load(&store, org)?,
+                    None => None,
+                },
+            }
+            .ok_or_else(pat::required)?;
+            return Self::from_pat(token);
+        }
+        let entra = EntraCredential::new(store, settings)?;
+        Ok(Arc::new(Self {
+            sdk: azure_devops_rust_api::Credential::from_token_credential(entra.clone()),
+            entra: Some(entra),
+        }))
+    }
+
+    pub fn from_pat(pat: String) -> Result<Arc<Self>> {
+        pat::validate(&pat)?;
+        Ok(Arc::new(Self {
+            sdk: azure_devops_rust_api::Credential::from_pat(pat),
+            entra: None,
+        }))
+    }
+
+    pub fn sdk(&self) -> azure_devops_rust_api::Credential {
+        self.sdk.clone()
+    }
+
+    pub async fn authenticate(&self) -> Result<()> {
+        if let Some(entra) = &self.entra {
+            entra.token().await?;
+        }
+        Ok(())
+    }
+}
+
+struct EntraCredential {
+    store: Store,
+    settings: Settings,
+    #[cfg(windows)]
+    cached: tokio::sync::Mutex<Option<AccessToken>>,
+}
+impl std::fmt::Debug for EntraCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DevOpsCredential { .. }")
+    }
+}
+impl EntraCredential {
     pub fn new(store: Store, settings: Settings) -> Result<Arc<Self>> {
         settings.identity()?;
         Ok(Arc::new(Self {
@@ -54,7 +114,7 @@ impl Credential {
     }
 }
 #[async_trait::async_trait]
-impl TokenCredential for Credential {
+impl TokenCredential for EntraCredential {
     async fn get_token(
         &self,
         scopes: &[&str],
@@ -147,6 +207,30 @@ pub async fn login(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn pat_credential_needs_no_entra_identity_and_redacts_debug() -> Result<()> {
+        let secret = "fixture-personal-access-token";
+        let credential = Credential::from_pat(secret.into())?;
+        credential.authenticate().await?;
+        assert!(credential.entra.is_none());
+        assert!(!format!("{credential:?}").contains(secret));
+        assert!(matches!(
+            credential.sdk(),
+            azure_devops_rust_api::Credential::Pat(_)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_pats_are_rejected_without_echoing_them() {
+        for pat in ["", "fixture secret", "fixture\r\nsecret", "é"] {
+            let result = Credential::from_pat(pat.into());
+            assert!(result.is_err());
+            if !pat.is_empty() {
+                assert!(!format!("{result:?}").contains(pat));
+            }
+        }
+    }
     use time::OffsetDateTime;
 
     #[tokio::test]

@@ -108,7 +108,7 @@ jobs:
 
           \`mise use -g github:$GH_REPO@$VERSION\`
 
-          Start setup with \`devops login\`. It discovers the tenant from the organization; you only need your own Entra public-client app ID.
+          Start setup with \`devops login\`. Enter your organization and a personal access token at the hidden prompt; no Entra app registration is required. Entra sign-in remains available with \`--entra\`.
           Linux uses a static musl binary, with no glibc requirement. ARM64 and macOS builds are not provided.
           Live tenant authentication acceptance is still required. See the README and docs/acceptance.md.
           EOF

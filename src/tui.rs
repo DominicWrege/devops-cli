@@ -1,7 +1,7 @@
 use crate::{
     auth,
     cli::*,
-    config::{Settings, Store, Target},
+    config::{AuthMethod, Settings, Store, Target},
     output::{self, scalar, text},
     pipeline::{LogKey, Viewer},
     service::{Service, build_summary, response_id},
@@ -92,6 +92,7 @@ enum Message {
 
 enum FormKind {
     Identity,
+    PatIdentity,
     Create,
     Edit(i32),
     Comment(i32),
@@ -101,6 +102,16 @@ enum FormKind {
 struct Field {
     name: &'static str,
     value: String,
+    secret: bool,
+}
+impl Field {
+    fn display(&self) -> String {
+        if self.secret {
+            "*".repeat(self.value.chars().count())
+        } else {
+            output::clean(&self.value)
+        }
+    }
 }
 struct Form {
     kind: FormKind,
@@ -109,11 +120,17 @@ struct Form {
 }
 impl Form {
     fn new(kind: FormKind, fields: Vec<(&'static str, String)>) -> Self {
+        let pat = matches!(kind, FormKind::PatIdentity);
         Self {
             kind,
             fields: fields
                 .into_iter()
-                .map(|(name, value)| Field { name, value })
+                .enumerate()
+                .map(|(i, (name, value))| Field {
+                    name,
+                    value,
+                    secret: pat && i == 1,
+                })
                 .collect(),
             selected: 0,
         }
@@ -178,7 +195,7 @@ impl Form {
                     .map_err(|e| anyhow::anyhow!(e))?,
                 yes: true,
             },
-            FormKind::Identity => anyhow::bail!("Not a PR action"),
+            FormKind::Identity | FormKind::PatIdentity => anyhow::bail!("Not a PR action"),
         })
     }
 }
@@ -238,10 +255,9 @@ impl App {
         let target = self
             .settings
             .target(self.org.as_deref(), self.project.as_deref())?;
-        Service::new(
-            auth::Credential::new(self.store.clone(), self.settings.clone())?,
-            target,
-        )
+        let mut identity = self.settings.clone();
+        identity.organization = Some(target.organization.clone());
+        Service::new(auth::Credential::new(self.store.clone(), identity)?, target)
     }
     fn setup_api(&self) -> Result<Service> {
         Service::new(
@@ -280,6 +296,25 @@ impl App {
         self.detail_scroll = 0;
     }
     fn identity_form(&mut self) {
+        if auth::uses_pat(&self.settings) {
+            self.form = Some(Form::new(
+                FormKind::PatIdentity,
+                vec![
+                    (
+                        "Organization",
+                        self.org
+                            .clone()
+                            .or_else(|| self.settings.organization.clone())
+                            .unwrap_or_default(),
+                    ),
+                    (
+                        "Personal access token (blank: keep saved token / DEVOPS_PAT)",
+                        String::new(),
+                    ),
+                ],
+            ));
+            return;
+        }
         self.form = Some(Form::new(
             FormKind::Identity,
             vec![
@@ -295,6 +330,15 @@ impl App {
         ));
     }
     fn sign_in(&mut self) -> Result<()> {
+        if auth::uses_pat(&self.settings) {
+            let mut api = self.setup_api()?;
+            if let Some(org) = &self.setup_org {
+                api.target.organization = org.clone();
+            }
+            self.setup_org = Some(api.target.organization.clone());
+            self.launch(async move { Ok(Message::Projects(api.projects().await?)) });
+            return Ok(());
+        }
         self.settings.identity()?;
         let store = self.store.clone();
         let settings = self.settings.clone();
@@ -432,6 +476,46 @@ impl App {
     }
     fn submit(&mut self) -> Result<()> {
         let form = self.form.as_ref().context("No form")?;
+        if matches!(form.kind, FormKind::PatIdentity) {
+            let organization = crate::config::organization(form.value(0)?)?;
+            let entered = form.value(1)?;
+            let environment = auth::pat::environment()?;
+            if !entered.is_empty() && environment.is_some() {
+                return Err(crate::error::invalid(
+                    "Unset DEVOPS_PAT before replacing the saved token, or leave the token field blank to use the environment override.",
+                ));
+            }
+            let persist = !entered.is_empty();
+            let token = if persist {
+                auth::pat::validate(entered)?;
+                entered.to_owned()
+            } else {
+                match environment {
+                    Some(token) => token,
+                    None => auth::pat::load(&self.store, &organization)?
+                        .ok_or_else(auth::pat::required)?,
+                }
+            };
+            let api = Service::new(
+                auth::Credential::from_pat(token.clone())?,
+                Target {
+                    organization: organization.clone(),
+                    project: String::new(),
+                },
+            )?;
+            let store = self.store.clone();
+            // Commit the new organization only after the user selects its project.
+            self.setup_org = Some(organization.clone());
+            self.form = None;
+            self.launch(async move {
+                let projects = api.projects().await?;
+                if persist {
+                    auth::pat::save(&store, &organization, &token)?;
+                }
+                Ok(Message::Projects(projects))
+            });
+            return Ok(());
+        }
         if matches!(form.kind, FormKind::Identity) {
             let mut settings = self.settings.clone();
             settings.tenant_id = Some(form.value(0)?.trim().into());
@@ -470,8 +554,15 @@ impl App {
                 settings.organization = self.setup_org.clone();
                 settings.project = Some(text(project, "name").into());
                 settings.project_id = project["id"].as_str().map(str::to_string);
+                if auth::uses_pat(&settings) {
+                    settings.auth = AuthMethod::Pat;
+                }
                 settings.target(None, None)?;
                 self.store.save(&settings)?;
+                if settings.auth == AuthMethod::Pat {
+                    self.org = None;
+                    self.project = None;
+                }
                 self.settings = settings;
                 self.setup_org = None;
                 self.set_screen(Screen::Home);
@@ -699,7 +790,12 @@ pub async fn run(
 ) -> Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut app = App::new(store, settings, org, project, tx);
-    if app.settings.identity().is_err() || app.settings.target(None, None).is_err() {
+    if auth::Credential::new(app.store.clone(), app.settings.clone()).is_err()
+        || app
+            .settings
+            .target(app.org.as_deref(), app.project.as_deref())
+            .is_err()
+    {
         app.identity_form();
     }
     let (_guard, mut terminal) = TerminalGuard::enter()?;
@@ -749,7 +845,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
     );
     let help = match &mut app.screen {
         Screen::Home => {
-            frame.render_widget(Paragraph::new("p  Pull requests\ni  Assigned reviews needing attention\nl  YAML pipelines\ns  Sign in / setup\nq  Quit\n\nThe pipeline screen is observation-only. Use the CLI for pipeline writes.\n\nSetup requires your tenant UUID and an Entra public-client application UUID.\nExisting Windows and WSL sessions are separate.").block(Block::bordered().title("Home")),layout[1]);
+            frame.render_widget(Paragraph::new("p  Pull requests\ni  Assigned reviews needing attention\nl  YAML pipelines\ns  Sign in / setup\nq  Quit\n\nThe pipeline screen is observation-only. Use the CLI for pipeline writes.\n\nSetup asks for a personal access token (hidden input); no app registration required.\nRepository autodetection is not available yet; choose your organization and project.\nExisting Windows and WSL sessions are separate.").block(Block::bordered().title("Home")),layout[1]);
             "p: PRs   i: assigned reviews   l: pipelines   s: setup   q: quit"
         }
         Screen::Organizations(items) => {
@@ -875,13 +971,10 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 ),
                 style,
             ));
-            lines.push(Line::styled(
-                format!("  {}", output::clean(&field.value)),
-                style,
-            ));
+            lines.push(Line::styled(format!("  {}", field.display()), style));
             lines.push(Line::from(""));
         }
-        let title = if matches!(form.kind, FormKind::Identity) {
+        let title = if matches!(form.kind, FormKind::Identity | FormKind::PatIdentity) {
             "Sign in and setup"
         } else {
             "Pull request action"
@@ -1066,6 +1159,67 @@ mod tests {
     }
     fn key(code: KeyCode) -> Event {
         Event::Key(event::KeyEvent::new(code, KeyModifiers::NONE))
+    }
+    #[test]
+    fn pat_setup_asks_for_organization_and_a_masked_token_not_app_registration() -> Result<()> {
+        let (_root, mut app) = fixture()?;
+        app.settings.auth = AuthMethod::Pat;
+        app.identity_form();
+        let form = app.form.as_ref().context("Expected setup form")?;
+        assert!(matches!(form.kind, FormKind::PatIdentity));
+        assert_eq!(form.fields.len(), 2);
+        assert_eq!(form.value(0)?, "saved");
+        assert!(form.fields[0].name.contains("Organization"));
+        assert!(form.fields[1].secret);
+        assert!(form.fields[1].value.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn pat_form_never_renders_entered_or_pasted_token_text() -> Result<()> {
+        let (_root, mut app) = fixture()?;
+        app.identity_form();
+        app.handle(key(KeyCode::Tab))?;
+        app.handle(Event::Paste("fixture-secret-pat".into()))?;
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend)?;
+        terminal.draw(|f| draw(f, &mut app))?;
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("******************"));
+        assert!(!rendered.contains("fixture-secret-pat"));
+        app.handle(key(KeyCode::Esc))?;
+        assert!(app.form.is_none());
+        assert!(!app.store.root.exists());
+        Ok(())
+    }
+    #[test]
+    fn pat_setup_commits_the_target_only_when_a_project_is_selected() -> Result<()> {
+        let (_root, mut app) = fixture()?;
+        app.settings.auth = AuthMethod::Pat;
+        app.store.save(&app.settings)?;
+        let before = app.settings.clone();
+        app.setup_org = Some("different".into());
+        app.screen = Screen::Projects(vec![]);
+        app.handle(key(KeyCode::Esc))?;
+        assert_eq!(app.store.load()?, before);
+
+        app.screen = Screen::Projects(vec![json!({"id":"project-id","name":"New Project"})]);
+        app.org = Some("override".into());
+        app.project = Some("override-project".into());
+        app.enter()?;
+        let saved = app.store.load()?;
+        assert_eq!(saved.auth, AuthMethod::Pat);
+        assert_eq!(saved.organization.as_deref(), Some("different"));
+        assert_eq!(saved.project.as_deref(), Some("New Project"));
+        assert!(app.org.is_none() && app.project.is_none());
+        assert!(saved.tenant_id.is_none() && saved.client_id.is_none());
+        Ok(())
     }
     #[test]
     fn abandonment_requires_a_separate_confirmation() -> Result<()> {

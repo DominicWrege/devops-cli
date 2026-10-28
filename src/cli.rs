@@ -19,19 +19,51 @@ pub struct Cli {
 pub enum Command {
     /// Sign in and save the organization and client settings
     Login {
-        #[arg(long, help = "Override the saved tenant ID; discovered from --org")]
+        #[arg(
+            long,
+            conflicts_with = "pat",
+            help = "Override the saved tenant ID; discovered from --org"
+        )]
         tenant_id: Option<String>,
-        #[arg(long, help = "Entra public-client application ID")]
+        #[arg(
+            long,
+            conflicts_with = "pat",
+            help = "Entra public-client application ID"
+        )]
         client_id: Option<String>,
+        #[arg(
+            long,
+            conflicts_with = "entra",
+            help = "Use personal access token authentication (default); prompt with hidden input"
+        )]
+        pat: bool,
+        #[arg(
+            long,
+            conflicts_with = "pat",
+            help = "Use Microsoft Entra sign-in instead of a PAT"
+        )]
+        entra: bool,
     },
     /// Launch the interactive interface and setup wizard
     Tui,
     /// Save explicit defaults without prompting or signing in
     Init {
-        #[arg(long)]
+        #[arg(long, conflicts_with = "pat")]
         tenant_id: Option<String>,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "pat")]
         client_id: Option<String>,
+        #[arg(
+            long,
+            conflicts_with = "entra",
+            help = "Save PAT authentication defaults (default for new settings)"
+        )]
+        pat: bool,
+        #[arg(
+            long,
+            conflicts_with = "pat",
+            help = "Save Microsoft Entra authentication defaults"
+        )]
+        entra: bool,
     },
     /// Inspect saved defaults without displaying credentials
     Config,

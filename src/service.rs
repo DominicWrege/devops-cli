@@ -121,7 +121,7 @@ pub struct Service {
 impl Service {
     pub fn new(credential: Arc<auth::Credential>, target: Target) -> Result<Self> {
         Ok(Self {
-            credential: ado::Credential::from_token_credential(credential),
+            credential: credential.sdk(),
             endpoint: "https://dev.azure.com".parse()?,
             profile_endpoint: "https://app.vssps.visualstudio.com".parse()?,
             target,
@@ -210,6 +210,19 @@ impl Service {
             token = next;
         }
         Ok(all)
+    }
+    pub async fn check_access(&self) -> Result<()> {
+        let client = ado::core::ClientBuilder::new(self.credential.clone())
+            .endpoint(self.endpoint.clone())
+            .retry(RetryOptions::none())
+            .per_call_policies(policies(None))
+            .build();
+        let projects = call!(client.projects_client().list(self.org()).top(1))?;
+        ensure!(
+            projects["value"].is_array(),
+            "Cannot verify Azure DevOps project-listing access"
+        );
+        Ok(())
     }
     pub async fn repo_create(&self, name: &str) -> Result<Value> {
         repository(name)?;
@@ -993,6 +1006,81 @@ mod tests {
         Mock::given(method("POST")).and(path("/org/project/_apis/git/repositories")).and(header("authorization","Bearer fixture-access-token"))
             .and(body_json(json!({"name":"demo"}))).respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"repo","name":"demo","remoteUrl":"https://dev.azure.com/org/project/_git/demo"}))).expect(1).mount(&server).await;
         assert_eq!(api(&server)?.repo_create("demo").await?["name"], "demo");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pat_uses_basic_auth_for_project_validation_and_operations() -> Result<()> {
+        use base64::Engine;
+        let server = MockServer::start().await;
+        let mut api = api(&server)?;
+        api.credential = auth::Credential::from_pat("fixture-pat".into())?.sdk();
+        let authorization = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(":fixture-pat")
+        );
+        Mock::given(method("GET"))
+            .and(path("/org/_apis/projects"))
+            .and(query_param("$top", "1"))
+            .and(header("authorization", authorization.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/org/project/_apis/pipelines"))
+            .and(header("authorization", authorization.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        api.check_access().await?;
+        assert!(api.pipeline_list().await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pat_failures_keep_stable_exit_codes_and_do_not_echo_responses() -> Result<()> {
+        for (status, code) in [(401, 3), (403, 4)] {
+            let server = MockServer::start().await;
+            let mut api = api(&server)?;
+            api.credential = auth::Credential::from_pat("fixture-pat".into())?.sdk();
+            Mock::given(method("GET"))
+                .and(path("/org/_apis/projects"))
+                .respond_with(ResponseTemplate::new(status).set_body_string("fixture-pat"))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let error = api
+                .check_access()
+                .await
+                .err()
+                .context("Expected PAT failure")?;
+            assert_eq!(
+                error
+                    .downcast_ref::<error::Failure>()
+                    .context("Expected stable exit code")?
+                    .code,
+                code
+            );
+            assert!(!error.to_string().contains("fixture-pat"));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pat_validation_rejects_sign_in_html_instead_of_accepting_it_as_success() -> Result<()>
+    {
+        let server = MockServer::start().await;
+        let mut api = api(&server)?;
+        api.credential = auth::Credential::from_pat("fixture-pat".into())?.sdk();
+        Mock::given(method("GET"))
+            .and(path("/org/_apis/projects"))
+            .respond_with(ResponseTemplate::new(203).set_body_string("<html>Sign in</html>"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert!(api.check_access().await.is_err());
         Ok(())
     }
     #[tokio::test]
