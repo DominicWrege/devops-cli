@@ -109,7 +109,8 @@ jobs:
           \`mise use -g github:$GH_REPO@$VERSION\`
 
           Start setup with \`devops login\`. Enter your organization and a personal access token at the masked prompt; no Entra app registration is required. Entra sign-in remains available with \`--entra\`.
-          Pipeline details now show live HH:MM:SS timers for the run and selected task, with final durations retained after completion. TUI pipeline lists and activity show readable timestamps and run durations. The per-pipeline run list now uses a table. Recent runs continue to refresh every 16 seconds.
+          The TUI now connects to the live task console while continuing to poll uploaded logs every two seconds. Uploaded logs replace the live tail after task completion. Connection failures are shown in the log pane and retried automatically. Background refreshes no longer flash the loading indicator, and duplicated footer shortcuts have been removed.
+          Live authentication and subscription were verified against Azure DevOps. Incoming console lines and the upload handoff passed local tests; delivery during an active tenant run remains unverified.
 
           Linux uses a static musl binary, with no glibc requirement. ARM64 and macOS builds are not provided.
           Live tenant authentication acceptance is still required. See the README and docs/acceptance.md.

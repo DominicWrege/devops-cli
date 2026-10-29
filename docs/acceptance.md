@@ -2,6 +2,23 @@
 
 No live Azure DevOps writes have been run by the implementation session. Use an explicitly approved disposable repository, PR, and pipeline for these checks.
 
+## 0.3.6 verification
+
+Windows checks cover 89 Rust tests, formatting, Clippy, five packaging tests, and
+an optimized build. A local WebSocket test verifies subscription and console-line
+delivery. Tests also cover task isolation, bounded retention, retries, handoff to
+uploaded logs, error redaction, and quiet background refreshes.
+
+A read-only check against sncom confirmed uploaded log retrieval for run 2992.
+SignalR negotiation initially returned HTTP 401 with the user's scoped PAT. After
+the user changed that PAT to full access, negotiation returned HTTP 200 and the
+WebSocket WatchBuild subscription succeeded. No minimum required scope has been
+established; full access is not a documented requirement of this application.
+Run 2993 had already completed, so the opt-in live smoke test timed out waiting
+for console batches. Incoming lines during an active tenant run remain unverified;
+the user approved release with this limitation. No pipeline was triggered by this
+session. Local WSL testing remains skipped at the user's request.
+
 ## 0.3.5 verification
 
 Windows checks cover 83 Rust tests, formatting, Clippy, release packaging tests,

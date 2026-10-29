@@ -9,7 +9,7 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.3.5
+mise use -g github:DominicWrege/devops-cli@0.3.6
 devops login
 ```
 
@@ -118,6 +118,12 @@ In PR details, use `e` to edit, `c` to comment, `v` to vote, `m` to merge, `a` t
 Forms use Tab to move between fields, Ctrl+U to clear a field, and Enter to submit.
 
 For pipelines, choose a pipeline and then a run. Tasks appear on the left; the selected task's logs appear on the right. Arrow keys change selection and pause following. PageUp/PageDown scroll logs. Press `f` to resume following within the selected job.
+
+Running tasks use a separate live-console connection. Uploaded logs are still polled
+every two seconds and replace the live tail after the task completes. A new connection
+may begin partway through a task; the uploaded log supplies its complete history.
+Connection failures appear in the log pane and retry automatically without stopping
+polling. Background timeline refreshes do not flash a loading indicator.
 
 The pipeline TUI only observes runs. Use the CLI to trigger, retry, cancel, or register pipelines.
 

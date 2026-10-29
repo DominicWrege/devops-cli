@@ -692,6 +692,9 @@ impl Service {
             Err(error) => Err(error),
         }
     }
+    pub fn live(&self) -> crate::live::Client {
+        crate::live::Client::new(self.credential.clone(), self.target.organization.clone())
+    }
     pub async fn log(&self, run: i32, log: i32, start: u64) -> Result<Vec<String>> {
         positive(run)?;
         positive(log)?;

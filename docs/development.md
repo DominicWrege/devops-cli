@@ -37,16 +37,16 @@ commit and wait for Windows, Linux musl, packaging, and Rust 1.88 CI to pass.
 Complete the live acceptance checklist before pushing a matching release tag:
 
 ```sh
-git tag v0.3.5
-git push origin v0.3.5
+git tag v0.3.6
+git push origin v0.3.6
 ```
 
 `.github/workflows/release.yml` validates the tag, tests and builds on each native platform, packages the binaries, verifies SHA-256 checksums, and publishes a GitHub release. The publishing job alone has write permission. Each archive includes the WAM attribution notice. A final job installs the published release through mise on each platform.
 
-Tags such as `v0.3.5-rc.1` become prereleases. Install them with:
+Tags such as `v0.3.6-rc.1` become prereleases. Install them with:
 
 ```sh
-mise use -g 'github:DominicWrege/devops-cli[prerelease=true]@0.3.5-rc.1'
+mise use -g 'github:DominicWrege/devops-cli[prerelease=true]@0.3.6-rc.1'
 ```
 
 If publication fails after creating a draft, inspect it before retrying. The workflow does not overwrite an existing release or its assets. Passing CI does not verify live Entra sign-in.

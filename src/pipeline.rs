@@ -59,6 +59,8 @@ pub struct Viewer {
     pub log: LogBuffer,
     pub top: u64,
     pub error: String,
+    pub live_status: String,
+    live_logs: HashMap<String, LogBuffer>,
 }
 impl Viewer {
     pub fn new(run_id: i32) -> Self {
@@ -73,10 +75,22 @@ impl Viewer {
             log: LogBuffer::default(),
             top: 0,
             error: String::new(),
+            live_status: "Connecting to live console".into(),
+            live_logs: HashMap::new(),
         }
     }
     pub fn update(&mut self, run: Value, records: Vec<Value>) {
         self.run = run;
+        for record in &records {
+            let id = text(record, "id");
+            if self
+                .records
+                .iter()
+                .any(|old| text(old, "id") == id && old["attempt"] != record["attempt"])
+            {
+                self.live_logs.remove(id);
+            }
+        }
         self.records = tree_order(records);
         if self.job.is_none() {
             self.job = self
@@ -148,12 +162,65 @@ impl Viewer {
         }
         self.reset_log_if_changed();
     }
+    pub fn accept_live(&mut self, event: crate::live::Event) {
+        match event {
+            crate::live::Event::Status(status) => {
+                // The console feed can replay a tail after reconnecting. Keep its
+                // offsets separate from the authoritative uploaded-log cursor.
+                if status == "Connecting to live console" {
+                    self.live_logs.clear();
+                }
+                self.live_status = status;
+            }
+            crate::live::Event::Lines { record, lines } => {
+                if self
+                    .records
+                    .iter()
+                    .any(|r| text(r, "id") == record && text(r, "state") == "completed")
+                {
+                    return;
+                }
+                if !self.live_logs.contains_key(&record) && self.live_logs.len() >= 8 {
+                    let evict = self
+                        .live_logs
+                        .keys()
+                        .find(|id| Some(id.as_str()) != self.selected.as_deref())
+                        .cloned();
+                    if let Some(id) = evict {
+                        self.live_logs.remove(&id);
+                    }
+                }
+                let buffer = self.live_logs.entry(record).or_default();
+                buffer.append(buffer.next, lines);
+            }
+        }
+    }
+    pub fn showing_live(&self) -> bool {
+        self.selected
+            .as_ref()
+            .and_then(|id| self.live_logs.get(id))
+            .is_some_and(|log| !log.lines.is_empty())
+            && (self.log.lines.is_empty()
+                || self
+                    .records
+                    .get(self.selection())
+                    .is_some_and(|r| text(r, "state") != "completed"))
+    }
+    pub fn visible_log(&self) -> &LogBuffer {
+        if self.showing_live()
+            && let Some(log) = self.selected.as_ref().and_then(|id| self.live_logs.get(id))
+        {
+            return log;
+        }
+        &self.log
+    }
     pub fn scroll(&mut self, delta: i64) {
         self.follow = false;
-        self.top = self.top.saturating_add_signed(delta).clamp(
-            self.log.base,
-            self.log.next.saturating_sub(1).max(self.log.base),
-        );
+        let log = self.visible_log();
+        self.top = self
+            .top
+            .saturating_add_signed(delta)
+            .clamp(log.base, log.next.saturating_sub(1).max(log.base));
     }
     pub fn resume(&mut self) {
         self.follow = true;
@@ -186,14 +253,14 @@ impl Viewer {
         }
     }
     pub fn offset(&mut self, height: usize) -> u16 {
+        let log = self.visible_log();
+        let base = log.base;
+        let next = log.next;
         if self.follow {
-            self.top = self
-                .log
-                .next
-                .saturating_sub(height as u64)
-                .max(self.log.base);
+            self.top = next.saturating_sub(height as u64).max(base);
         }
-        self.top.saturating_sub(self.log.base).min(u16::MAX as u64) as u16
+        self.top = self.top.clamp(base, next.saturating_sub(1).max(base));
+        self.top.saturating_sub(base).min(u16::MAX as u64) as u16
     }
 }
 
@@ -284,6 +351,79 @@ mod tests {
         assert_eq!(viewer.log.next, 0);
         Ok(())
     }
+    #[test]
+    fn live_output_before_upload_is_replaced_by_archive_without_skipping_lines()
+    -> anyhow::Result<()> {
+        use anyhow::Context;
+        let mut viewer = Viewer::new(1);
+        let mut timeline = records();
+        timeline[2]
+            .as_object_mut()
+            .context("Task object")?
+            .remove("log");
+        viewer.update(Value::Null, timeline.clone());
+        assert!(viewer.log_key.is_none());
+        viewer.accept_live(crate::live::Event::Lines {
+            record: "a1".into(),
+            lines: vec!["live one".into(), "live two".into()],
+        });
+        assert!(viewer.showing_live());
+        assert_eq!(viewer.visible_log().lines.len(), 2);
+        assert_eq!(viewer.log.next, 0);
+        viewer.scroll(-1);
+        assert_eq!(viewer.visible_log().lines[0], "live one");
+        timeline[2]["state"] = json!("completed");
+        timeline[2]["log"] = json!({"id":1});
+        viewer.update(Value::Null, timeline);
+        let key = viewer.log_key.clone().context("Uploaded log available")?;
+        assert_eq!(viewer.log.next, 0);
+        assert!(viewer.showing_live());
+        viewer.accept_log(
+            key,
+            0,
+            vec![
+                "archive one".into(),
+                "archive two".into(),
+                "archive three".into(),
+            ],
+        );
+        assert!(!viewer.showing_live());
+        assert_eq!(viewer.visible_log().lines.len(), 3);
+        assert_eq!(viewer.log.next, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn live_tasks_are_isolated_and_retry_does_not_reuse_output() {
+        let mut viewer = Viewer::new(1);
+        viewer.update(Value::Null, records());
+        viewer.accept_live(crate::live::Event::Lines {
+            record: "a1".into(),
+            lines: vec!["task a".into()],
+        });
+        viewer.accept_live(crate::live::Event::Lines {
+            record: "b1".into(),
+            lines: vec!["task b".into()],
+        });
+        viewer.navigate(2);
+        assert_eq!(viewer.visible_log().lines[0], "task b");
+        let mut timeline = records();
+        timeline[3]["attempt"] = json!(2);
+        viewer.update(Value::Null, timeline);
+        assert!(viewer.visible_log().lines.is_empty());
+        viewer.accept_live(crate::live::Event::Status(
+            "Connecting to live console".into(),
+        ));
+        assert!(viewer.live_logs.is_empty());
+        for index in 0..20 {
+            viewer.accept_live(crate::live::Event::Lines {
+                record: format!("task{index}"),
+                lines: vec!["line".into()],
+            });
+        }
+        assert_eq!(viewer.live_logs.len(), 8);
+    }
+
     #[test]
     fn retention_preserves_absolute_offsets() {
         let mut log = LogBuffer::default();

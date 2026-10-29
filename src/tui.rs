@@ -208,6 +208,16 @@ impl Form {
     }
 }
 
+struct LiveSession {
+    task: JoinHandle<()>,
+    rx: mpsc::Receiver<crate::live::Event>,
+}
+impl Drop for LiveSession {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 struct App {
     store: Store,
     settings: Settings,
@@ -241,6 +251,7 @@ struct App {
     tx: mpsc::UnboundedSender<(u64, Message)>,
     generation: u64,
     poll_at: Instant,
+    live: Option<LiveSession>,
 }
 impl Drop for App {
     fn drop(&mut self) {
@@ -289,6 +300,7 @@ impl App {
             tx,
             generation: 0,
             poll_at: Instant::now(),
+            live: None,
         }
     }
     fn start(&mut self) -> Result<()> {
@@ -386,6 +398,7 @@ impl App {
         }));
     }
     fn set_screen(&mut self, screen: Screen) {
+        self.live = None;
         match self.screen {
             Screen::Prs(_) => self.pr_selection = self.selection.selected().unwrap_or(0),
             Screen::Pipelines(_) => {
@@ -608,10 +621,41 @@ impl App {
         self.loading_label = "Saving changes";
         Ok(())
     }
+    fn sync_live(&mut self) -> Result<()> {
+        let Screen::Watch(viewer) = &mut self.screen else {
+            self.live = None;
+            return Ok(());
+        };
+        if let Some(live) = &mut self.live {
+            while let Ok(event) = live.rx.try_recv() {
+                viewer.accept_live(event);
+            }
+        }
+        if viewer.run["status"] == "completed" {
+            self.live = None;
+            viewer.live_status = "Run completed; fetching uploaded logs".into();
+            return Ok(());
+        }
+        if self.live.is_none()
+            && let Some(project) = viewer.run["project"]["id"].as_str()
+        {
+            let project = project.to_string();
+            let run = viewer.run_id;
+            let client = self.api()?.live();
+            let (tx, rx) = mpsc::channel(64);
+            self.live = Some(LiveSession {
+                task: tokio::spawn(client.run(project, run, tx)),
+                rx,
+            });
+        }
+        Ok(())
+    }
     fn poll(&mut self) -> Result<()> {
         let Screen::Watch(viewer) = &self.screen else {
             return Ok(());
         };
+        let background = !viewer.run.is_null();
+        let previous_status = self.status.clone();
         let id = viewer.run_id;
         let key = viewer.log_key.clone();
         let start = viewer.log.next;
@@ -635,6 +679,10 @@ impl App {
                 log_error,
             })
         });
+        if background {
+            self.loading_since = None;
+            self.status = previous_status;
+        }
         Ok(())
     }
     fn receive(&mut self, (generation, message): (u64, Message)) {
@@ -1252,6 +1300,9 @@ pub async fn run(
         while let Ok(message) = rx.try_recv() {
             app.receive(message);
         }
+        if let Err(error) = app.sync_live() {
+            app.status = error.to_string();
+        }
         if app.task.is_none()
             && matches!(app.screen, Screen::Watch(_))
             && Instant::now() >= app.poll_at
@@ -1677,9 +1728,14 @@ fn draw(frame: &mut Frame, app: &mut App) {
             layout[1],
         );
     }
+    let navigation = if matches!(app.screen, Screen::Watch(_)) {
+        "s: settings"
+    } else {
+        "F6: pane   ←→: scroll   s: settings"
+    };
     frame.render_widget(
         Paragraph::new(output::clean(&format!(
-            "{help}   F6: pane   ←→: scroll   s: settings\n{}",
+            "{help}   {navigation}\n{}",
             status_text
         )))
         .wrap(Wrap { trim: false })
@@ -2001,11 +2057,24 @@ fn draw_viewer(
         0,
     );
     let offset = viewer.offset(columns[1].height.saturating_sub(2) as usize);
-    let log = if viewer.log.lines.is_empty() {
-        "Waiting for task logs...".into()
+    let log = if viewer.visible_log().lines.is_empty() {
+        if !viewer.error.is_empty() {
+            viewer.error.clone()
+        } else if viewer
+            .records
+            .get(viewer.selection())
+            .is_some_and(|r| text(r, "state") == "pending")
+        {
+            "This task has not started.".into()
+        } else {
+            format!(
+                "{}\nWaiting for console output or an uploaded log. Polling continues every 2 seconds.",
+                viewer.live_status
+            )
+        }
     } else {
         viewer
-            .log
+            .visible_log()
             .lines
             .iter()
             .cloned()
@@ -2018,9 +2087,18 @@ fn draw_viewer(
         .map(|record| run_timer(record, now))
         .unwrap_or_else(|| "Not started".into());
     let title = format!(
-        "Task logs | {task_timer} | {} | retained from line {}",
-        if viewer.follow { "live" } else { "paused" },
-        viewer.log.base
+        "Task logs | {task_timer} | {} | {} | retained from line {}",
+        if viewer.showing_live() {
+            "live console tail"
+        } else {
+            "uploaded log"
+        },
+        if viewer.follow {
+            "following"
+        } else {
+            "scroll paused"
+        },
+        viewer.visible_log().base
     );
     frame.render_widget(
         Paragraph::new(log).scroll((offset, horizontal[1])).block(
@@ -2030,7 +2108,8 @@ fn draw_viewer(
                 } else {
                     Style::default()
                 })
-                .title(title),
+                .title(title)
+                .title_bottom(output::clean(&viewer.live_status)),
         ),
         columns[1],
     );
@@ -2328,6 +2407,34 @@ mod tests {
         assert!(rendered.contains("Alpha"));
         app.handle(key(KeyCode::Down))?;
         assert_eq!(app.selection.selected(), Some(1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn background_log_refresh_does_not_flash_loading_and_leaving_stops_stream() -> Result<()>
+    {
+        let (_root, mut app) = fixture()?;
+        auth::pat::save(&app.store, "saved", "fixture-pat")?;
+        let mut viewer = Viewer::new(42);
+        viewer.run = json!({"id":42,"status":"inProgress"});
+        app.screen = Screen::Watch(Box::new(viewer));
+        app.status = "Ready".into();
+        app.poll()?;
+        assert!(app.loading_since.is_none());
+        assert_eq!(app.status, "Ready");
+        app.cancel_task();
+        let (tx, rx) = mpsc::channel(1);
+        app.live = Some(LiveSession {
+            task: tokio::spawn(async move {
+                tx.closed().await;
+            }),
+            rx,
+        });
+        app.set_screen(Screen::Home);
+        assert!(app.live.is_none());
+        app.screen = Screen::Watch(Box::new(Viewer::new(42)));
+        app.poll()?;
+        assert!(app.loading_since.is_some());
         Ok(())
     }
 
