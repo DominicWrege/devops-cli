@@ -9,7 +9,7 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.3.4
+mise use -g github:DominicWrege/devops-cli@0.3.5
 devops login
 ```
 

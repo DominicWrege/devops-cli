@@ -2,6 +2,15 @@
 
 No live Azure DevOps writes have been run by the implementation session. Use an explicitly approved disposable repository, PR, and pipeline for these checks.
 
+## 0.3.5 verification
+
+Windows checks cover 83 Rust tests, formatting, Clippy, release packaging tests,
+and the release build. Timer tests cover live updates, completed durations,
+missing timestamps, clock skew, and both build and pipeline API date fields.
+Timestamp tests cover relative times and UTC dates; a TUI rendering test checks
+the duration column. Local WSL testing was skipped at the user's request.
+Live tenant behavior was not retested for this patch.
+
 ## 0.3.4 verification
 
 Windows checks cover 81 Rust tests, five packaging tests, formatting, Clippy,

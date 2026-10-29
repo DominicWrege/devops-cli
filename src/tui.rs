@@ -1309,6 +1309,7 @@ fn loading_text(label: &str, elapsed: Duration, writing: bool) -> String {
 }
 
 fn draw(frame: &mut Frame, app: &mut App) {
+    let now = time::OffsetDateTime::now_utc();
     let loading = app
         .loading_since
         .filter(|_| app.task.is_some())
@@ -1496,13 +1497,14 @@ fn draw(frame: &mut Frame, app: &mut App) {
                     .take(20)
                     .map(|run| {
                         format!(
-                            "{} #{}  {}  {}  {}\n    {}",
+                            "{} #{}  {}  {}  {}\n    {} | Duration: {}",
                             run_icon(run),
                             scalar(&run["id"]),
                             text(run, "name"),
                             text(run, "state"),
                             text(run, "result"),
-                            text(run, "createdDate")
+                            human_timestamp(text(run, "createdDate"), now),
+                            run_timer(run, now)
                         )
                     })
                     .collect::<Vec<_>>()
@@ -1573,7 +1575,8 @@ fn draw(frame: &mut Frame, app: &mut App) {
                             output::cell(
                                 text(run, "sourceBranch").trim_start_matches("refs/heads/"),
                             ),
-                            output::cell(text(run, "queueTime")),
+                            human_timestamp(text(run, "queueTime"), now),
+                            run_timer(run, now),
                         ]
                         .into_iter()
                         .map(|cell| {
@@ -1588,38 +1591,63 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 frame,
                 layout[1],
                 "Recent runs | newest first | refresh 16s",
-                vec!["Status", "Pipeline", "Run", "Branch", "Queued"],
+                vec!["Status", "Pipeline", "Run", "Branch", "Queued", "Duration"],
                 rows,
                 vec![
                     Constraint::Length(13),
-                    Constraint::Percentage(30),
+                    Constraint::Min(12),
                     Constraint::Length(16),
-                    Constraint::Percentage(20),
-                    Constraint::Min(10),
+                    Constraint::Percentage(15),
+                    Constraint::Length(22),
+                    Constraint::Length(12),
                 ],
                 &mut app.selection,
             );
             "Up/Down: run   Enter: timeline and logs   a: all pipelines   F5: refresh"
         }
         Screen::Runs { values, .. } => {
-            draw_list(
+            let rows = values
+                .iter()
+                .map(|run| {
+                    Row::new(
+                        vec![
+                            format!(
+                                "{} {}",
+                                run_icon(run),
+                                output::cell(if text(run, "result").is_empty() {
+                                    text(run, "state")
+                                } else {
+                                    text(run, "result")
+                                })
+                            ),
+                            scalar(&run["id"]),
+                            output::cell(text(run, "name")),
+                            human_timestamp(text(run, "createdDate"), now),
+                            run_timer(run, now),
+                        ]
+                        .into_iter()
+                        .map(|cell| {
+                            cell.chars()
+                                .skip(app.pane_x[0] as usize)
+                                .collect::<String>()
+                        }),
+                    )
+                })
+                .collect();
+            draw_table(
                 frame,
                 layout[1],
                 "Recent runs",
-                values
-                    .iter()
-                    .map(|v| {
-                        format!(
-                            "{}  {}  {}  {}",
-                            scalar(&v["id"]),
-                            text(v, "name"),
-                            text(v, "state"),
-                            text(v, "result")
-                        )
-                    })
-                    .collect(),
+                vec!["Status", "ID", "Run", "Created", "Duration"],
+                rows,
+                vec![
+                    Constraint::Length(13),
+                    Constraint::Length(8),
+                    Constraint::Min(12),
+                    Constraint::Length(22),
+                    Constraint::Length(12),
+                ],
                 &mut app.selection,
-                app.pane_x[0],
             );
             "Enter: observe   F5: refresh   Esc: home"
         }
@@ -1840,6 +1868,70 @@ fn draw_list(
         state,
     );
 }
+fn human_timestamp(value: &str, now: time::OffsetDateTime) -> String {
+    let Ok(timestamp) =
+        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+    else {
+        return "Unknown".into();
+    };
+    let seconds = (now - timestamp).whole_seconds();
+    if seconds.abs() < 60 {
+        return "Just now".into();
+    }
+    if seconds.abs() < 7 * 24 * 3600 {
+        let (amount, unit) = match seconds.abs() {
+            n if n < 3600 => (n / 60, "min"),
+            n if n < 86400 => (n / 3600, "h"),
+            n => (n / 86400, "d"),
+        };
+        return if seconds < 0 {
+            format!("In {amount}{unit}")
+        } else {
+            format!("{amount}{unit} ago")
+        };
+    }
+    let timestamp = timestamp.to_offset(time::UtcOffset::UTC);
+    let months = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    format!(
+        "{} {} {} {:02}:{:02} UTC",
+        timestamp.day(),
+        months[timestamp.month() as usize - 1],
+        timestamp.year(),
+        timestamp.hour(),
+        timestamp.minute()
+    )
+}
+
+fn run_timer(value: &Value, now: time::OffsetDateTime) -> String {
+    let parse = |field: &str| {
+        value[field].as_str().and_then(|s| {
+            time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
+        })
+    };
+    let Some(start) = parse("startTime").or_else(|| parse("createdDate")) else {
+        return "Not started".into();
+    };
+    let end = match parse("finishTime").or_else(|| parse("finishedDate")) {
+        Some(end) => end,
+        None if value["state"] == "completed"
+            || value["status"] == "completed"
+            || value["result"].as_str().is_some_and(|r| !r.is_empty()) =>
+        {
+            return "Duration unavailable".into();
+        }
+        None => now,
+    };
+    let seconds = (end - start).whole_seconds().max(0);
+    format!(
+        "{:02}:{:02}:{:02}",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60
+    )
+}
+
 fn draw_viewer(
     frame: &mut Frame,
     area: Rect,
@@ -1849,22 +1941,8 @@ fn draw_viewer(
     vertical: [u16; 3],
 ) {
     let panes = Layout::vertical([Constraint::Length(8), Constraint::Min(1)]).split(area);
-    let elapsed = viewer.run["startTime"]
-        .as_str()
-        .and_then(|s| {
-            time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
-        })
-        .map(|start| {
-            let end = viewer.run["finishTime"]
-                .as_str()
-                .and_then(|s| {
-                    time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
-                        .ok()
-                })
-                .unwrap_or_else(time::OffsetDateTime::now_utc);
-            format!("{}s", (end - start).whole_seconds().max(0))
-        })
-        .unwrap_or_default();
+    let now = time::OffsetDateTime::now_utc();
+    let elapsed = run_timer(&viewer.run, now);
     frame.render_widget(
         Paragraph::new(output::clean(&format!(
             "{}\nElapsed: {elapsed}",
@@ -1878,7 +1956,10 @@ fn draw_viewer(
                 } else {
                     Style::default()
                 })
-                .title(if viewer.follow { "Following" } else { "Paused" }),
+                .title(format!(
+                    "{} | Elapsed: {elapsed}",
+                    if viewer.follow { "Following" } else { "Paused" }
+                )),
         ),
         panes[0],
     );
@@ -1931,8 +2012,13 @@ fn draw_viewer(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let task_timer = viewer
+        .records
+        .get(viewer.selection())
+        .map(|record| run_timer(record, now))
+        .unwrap_or_else(|| "Not started".into());
     let title = format!(
-        "Task logs | {} | retained from line {}",
+        "Task logs | {task_timer} | {} | retained from line {}",
         if viewer.follow { "live" } else { "paused" },
         viewer.log.base
     );
@@ -1968,6 +2054,87 @@ fn center(area: Rect, width: u16, height: u16) -> Rect {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn timers_tick_and_freeze_when_finished() -> Result<()> {
+        let start = time::OffsetDateTime::parse(
+            "2026-10-29T09:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )?;
+        let running = json!({"startTime":"2026-10-29T09:00:00Z", "status":"inProgress"});
+        assert_eq!(
+            run_timer(&running, start + time::Duration::seconds(3661)),
+            "01:01:01"
+        );
+        assert_eq!(
+            run_timer(&running, start + time::Duration::seconds(3662)),
+            "01:01:02"
+        );
+        let completed = json!({"startTime":"2026-10-29T09:00:00Z", "finishTime":"2026-10-29T09:02:03Z", "status":"completed"});
+        assert_eq!(
+            run_timer(&completed, start + time::Duration::hours(5)),
+            "00:02:03"
+        );
+        assert_eq!(run_timer(&json!({"state":"pending"}), start), "Not started");
+        assert_eq!(run_timer(&json!({"startTime":"bad"}), start), "Not started");
+        assert_eq!(
+            run_timer(
+                &json!({"startTime":"2026-10-29T09:00:00Z", "state":"completed"}),
+                start
+            ),
+            "Duration unavailable"
+        );
+        assert_eq!(
+            run_timer(&running, start - time::Duration::seconds(1)),
+            "00:00:00"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn readable_run_times_and_pipeline_api_durations() -> Result<()> {
+        let now = time::OffsetDateTime::parse(
+            "2026-10-29T09:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )?;
+        assert_eq!(
+            human_timestamp("2026-10-29T10:59:40+02:00", now),
+            "Just now"
+        );
+        assert_eq!(human_timestamp("2026-10-29T08:58:00Z", now), "2min ago");
+        assert_eq!(human_timestamp("2026-10-29T07:00:00Z", now), "2h ago");
+        assert_eq!(human_timestamp("2026-10-28T09:00:00Z", now), "1d ago");
+        assert_eq!(human_timestamp("2026-10-29T09:02:00Z", now), "In 2min");
+        assert_eq!(
+            human_timestamp("2026-10-01T11:00:00+02:00", now),
+            "1 Oct 2026 09:00 UTC"
+        );
+        assert_eq!(human_timestamp("", now), "Unknown");
+        assert_eq!(
+            run_timer(
+                &json!({"createdDate":"2026-10-29T08:00:00Z", "finishedDate":"2026-10-29T08:02:10Z", "state":"completed"}),
+                now
+            ),
+            "00:02:10"
+        );
+        let (_root, mut app) = fixture()?;
+        app.screen = Screen::Recent(vec![
+            json!({"id":1,"definition":{"name":"Build app"},"queueTime":"2026-10-01T09:00:00Z","startTime":"2026-10-01T09:00:00Z","finishTime":"2026-10-01T09:02:10Z","status":"completed","result":"succeeded"}),
+        ]);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 35))?;
+        terminal.draw(|frame| draw(frame, &mut app))?;
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Duration"));
+        assert!(rendered.contains("00:02:10"));
+        assert!(!rendered.contains("2026-10-01T"));
+        Ok(())
+    }
+
     fn fixture() -> Result<(tempfile::TempDir, App)> {
         let root = tempfile::tempdir()?;
         let (tx, _rx) = mpsc::unbounded_channel();
