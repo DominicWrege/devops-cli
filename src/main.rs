@@ -194,7 +194,7 @@ async fn run(cli: Cli) -> Result<()> {
             command: cli::RepoCommand::List,
         } => output::table(
             &api.repo_list().await?,
-            &[("ID", "id"), ("NAME", "name"), ("URL", "remoteUrl")],
+            &[("NAME", "name"), ("URL", "remoteUrl")],
         )?,
         Command::Pipeline {
             command: PipelineCommand::Watch { run },

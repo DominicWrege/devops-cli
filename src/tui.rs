@@ -93,13 +93,17 @@ enum Message {
         pipeline: i32,
         values: Vec<Value>,
     },
+    PipelineEdited {
+        id: i32,
+        name: String,
+        folder: String,
+    },
     Written(String),
     Error(String),
 }
 
 enum FormKind {
-    PipelineRename(i32),
-    PipelineMove(i32),
+    PipelineEdit(i32),
     Identity,
     PatIdentity,
     Create,
@@ -199,10 +203,9 @@ impl Form {
                     .map_err(|e| anyhow::anyhow!(e))?,
                 yes: true,
             },
-            FormKind::PipelineRename(_)
-            | FormKind::PipelineMove(_)
-            | FormKind::Identity
-            | FormKind::PatIdentity => anyhow::bail!("Not a PR action"),
+            FormKind::PipelineEdit(_) | FormKind::Identity | FormKind::PatIdentity => {
+                anyhow::bail!("Not a PR action")
+            }
         })
     }
 }
@@ -233,6 +236,7 @@ struct App {
     pane_y: [u16; 3],
     form: Option<Form>,
     confirm: Option<PrCommand>,
+    pr_actions: bool,
     settings_menu: Option<usize>,
     status: String,
     task: Option<JoinHandle<()>>,
@@ -283,6 +287,7 @@ impl App {
             pane_y: [0; 3],
             form: None,
             confirm: None,
+            pr_actions: false,
             settings_menu: None,
             status: String::new(),
             task: None,
@@ -777,6 +782,21 @@ impl App {
                     }
                 }
             }
+            Message::PipelineEdited { id, name, folder } => {
+                self.form = None;
+                self.pipeline_cache = None;
+                if let Screen::Pipelines(items) = &mut self.screen {
+                    if let Some(item) = items.iter_mut().find(|item| item["id"] == id) {
+                        item["name"] = serde_json::json!(name);
+                        item["folder"] = serde_json::json!(folder);
+                    }
+                    sort_pipelines(items);
+                    let selected = items.iter().position(|item| item["id"] == id).unwrap_or(0);
+                    self.selection.select(Some(selected));
+                    self.pipeline_selection = selected;
+                }
+                self.status = format!("Saved pipeline {name}");
+            }
             Message::Written(message) => {
                 self.pr_cache = None;
                 self.pipeline_cache = None;
@@ -843,25 +863,30 @@ impl App {
             self.form = None;
             return self.sign_in();
         }
-        if matches!(
-            form.kind,
-            FormKind::PipelineRename(_) | FormKind::PipelineMove(_)
-        ) {
-            let command = match form.kind {
-                FormKind::PipelineRename(id) => crate::cli::PipelineCommand::Rename {
-                    id,
-                    name: form.value(0)?.into(),
-                },
-                FormKind::PipelineMove(id) => crate::cli::PipelineCommand::Move {
-                    id,
-                    folder: form.value(0)?.into(),
-                },
-                _ => anyhow::bail!("Invalid pipeline form"),
-            };
-            command.validate()?;
+        if let FormKind::PipelineEdit(id) = form.kind {
+            let name = form.value(0)?.trim().to_owned();
+            let folder = form.value(1)?.trim().replace('\\', "/");
+            let folder = format!("/{}", folder.trim_matches('/'));
+            crate::cli::PipelineCommand::Rename {
+                id,
+                name: name.clone(),
+            }
+            .validate()?;
+            crate::cli::PipelineCommand::Move {
+                id,
+                folder: folder.clone(),
+            }
+            .validate()?;
             let api = self.api()?;
-            self.form = None;
-            self.launch(async move { Ok(Message::Written(api.pipeline_action(&command).await?)) });
+            self.launch(async move {
+                let updated = api.pipeline_edit(id, Some(&name), Some(&folder)).await?;
+                Ok(Message::PipelineEdited {
+                    id,
+                    name: updated["name"].as_str().unwrap_or(&name).to_owned(),
+                    folder: updated["path"].as_str().unwrap_or(&folder).to_owned(),
+                })
+            });
+            self.loading_label = "Saving pipeline";
             self.writing = true;
             return Ok(());
         }
@@ -973,6 +998,16 @@ impl App {
                     )],
                 ))
             }
+            'v' => {
+                ensure!(
+                    value["status"] == "active",
+                    "Only active PRs can be approved"
+                );
+                self.confirm = Some(PrCommand::Review {
+                    id,
+                    vote: Vote::Approve,
+                });
+            }
             'a' => self.confirm = Some(PrCommand::Abandon { id, yes: true }),
             'r' => self.execute_pr(PrCommand::Reactivate { id })?,
             _ => (),
@@ -998,6 +1033,9 @@ impl App {
         Ok(())
     }
     fn handle(&mut self, event: Event) -> Result<bool> {
+        if self.writing && self.form.is_some() {
+            return Ok(false);
+        }
         if let Event::Paste(paste) = &event {
             if let Some(form) = &mut self.form {
                 form.selected_field()?.value.push_str(&output::clean(paste));
@@ -1018,6 +1056,17 @@ impl App {
                 KeyCode::Char('y') => self.execute_pr(command)?,
                 KeyCode::Char('n') | KeyCode::Esc => self.status = "Canceled".into(),
                 _ => self.confirm = Some(command),
+            }
+            return Ok(false);
+        }
+        if self.pr_actions {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('?') => self.pr_actions = false,
+                KeyCode::Char(action @ ('v' | 'e' | 'c' | 'm' | 'a' | 'r' | 'n')) => {
+                    self.pr_actions = false;
+                    self.open_pr_form(action)?;
+                }
+                _ => (),
             }
             return Ok(false);
         }
@@ -1066,7 +1115,7 @@ impl App {
             }
             return Ok(false);
         }
-        if key.code == KeyCode::Char('s') && !self.writing {
+        if key.code == KeyCode::Char('s') && !self.writing && matches!(self.screen, Screen::Home) {
             self.cancel_task();
             self.settings_menu = Some(0);
             return Ok(false);
@@ -1240,17 +1289,23 @@ impl App {
             && let Some(item) = items.get(self.selection.selected().unwrap_or(0))
         {
             let id = response_id(item, "id")?;
-            self.form = Some(if action == 'e' {
-                Form::new(
-                    FormKind::PipelineRename(id),
-                    vec![("Pipeline name", text(item, "name").into())],
-                )
-            } else {
-                Form::new(
-                    FormKind::PipelineMove(id),
-                    vec![("Destination folder", text(item, "folder").into())],
-                )
-            });
+            let mut form = Form::new(
+                FormKind::PipelineEdit(id),
+                vec![
+                    ("Name", text(item, "name").into()),
+                    (
+                        "Folder",
+                        format!(
+                            "/{}",
+                            text(item, "folder").replace('\\', "/").trim_matches('/')
+                        ),
+                    ),
+                ],
+            );
+            form.selected = usize::from(action == 'm');
+            self.cancel_task();
+            self.status.clear();
+            self.form = Some(form);
             return Ok(false);
         }
         match key.code {
@@ -1309,7 +1364,11 @@ impl App {
             KeyCode::PageDown => self.detail_scroll = self.detail_scroll.saturating_add(20),
             KeyCode::PageUp => self.detail_scroll = self.detail_scroll.saturating_sub(20),
             KeyCode::Char(c) if matches!(self.screen, Screen::Prs(_) | Screen::Pr { .. }) => {
-                self.open_pr_form(c)?
+                if c == '?' && matches!(self.screen, Screen::Pr { .. }) {
+                    self.pr_actions = true;
+                } else {
+                    self.open_pr_form(c)?
+                }
             }
             _ => (),
         }
@@ -1723,7 +1782,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 app.pane_focus,
                 app.pane_y,
             );
-            "e: edit   c: comment   m: merge   a: abandon   r: reactivate   n: create\nLeft/Right: detail tab   F6: focus   Up/Down: scroll   F5: refresh   Esc: PR list"
+            "v: Approve   ?: More actions   Esc: Back\nLeft/Right: tabs   F6: focus   F5: refresh"
         }
         Screen::Pipelines(items) => {
             let panes = if layout[1].width >= 90 {
@@ -1812,7 +1871,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 ],
                 &mut app.selection,
             );
-            "r: recent runs   Up/Down: pipeline   Enter: runs   e: rename   m: move   F5: refresh"
+            "r: recent runs   Up/Down: pipeline   Enter: runs   e: edit name/folder   m: move   F5: refresh"
         }
         Screen::Recent(items) => {
             let rows = items
@@ -1916,7 +1975,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 app.pane_x,
                 app.pane_y,
             );
-            "F6: tasks / logs / summary   ↑↓ PgUp/PgDn: scroll   ←→: horizontal   f: follow   Esc: back"
+            "F6: tasks / logs / summary   ←→: horizontal   f: follow   Esc: back"
         }
     };
     let empty = match &app.screen {
@@ -1933,10 +1992,13 @@ fn draw(frame: &mut Frame, app: &mut App) {
             layout[1],
         );
     }
-    let navigation = if matches!(app.screen, Screen::Watch(_)) {
-        "s: settings"
+    let navigation = if matches!(
+        app.screen,
+        Screen::Pr { .. } | Screen::Watch(_) | Screen::Home
+    ) {
+        ""
     } else {
-        "F6: pane   ←→: scroll   s: settings"
+        "F6: pane   ←→: scroll"
     };
     frame.render_widget(
         Paragraph::new(output::clean(&format!(
@@ -1968,10 +2030,19 @@ fn draw(frame: &mut Frame, app: &mut App) {
         );
     }
     if let Some(form) = &app.form {
-        let popup = center(area, 90, 85);
+        let pipeline_edit = matches!(form.kind, FormKind::PipelineEdit(_));
+        let popup = if pipeline_edit {
+            center(area, 80, 60)
+        } else {
+            center(area, 90, 85)
+        };
         frame.render_widget(Clear, popup);
         let mut lines = vec![
-            Line::from("Tab/Up/Down: field   Ctrl+U: clear   Enter: submit   Esc: cancel"),
+            Line::from(if pipeline_edit {
+                "Tab: field   Ctrl+U: clear   Enter: save   Esc: cancel"
+            } else {
+                "Tab/Up/Down: field   Ctrl+U: clear   Enter: submit   Esc: cancel"
+            }),
             Line::from(""),
         ];
         for (i, field) in form.fields.iter().enumerate() {
@@ -1991,7 +2062,19 @@ fn draw(frame: &mut Frame, app: &mut App) {
             lines.push(Line::styled(format!("  {}", field.display()), style));
             lines.push(Line::from(""));
         }
-        let title = if matches!(form.kind, FormKind::Identity | FormKind::PatIdentity) {
+        if pipeline_edit {
+            lines.push(Line::from(
+                "Folder: / for root, or /Team/Project. Blank moves to root.",
+            ));
+            lines.push(Line::from(if app.writing {
+                "Saving pipeline...".into()
+            } else {
+                output::clean(&app.status)
+            }));
+        }
+        let title = if pipeline_edit {
+            "Edit pipeline"
+        } else if matches!(form.kind, FormKind::Identity | FormKind::PatIdentity) {
             "Sign in and setup"
         } else {
             "Pull request action"
@@ -2006,10 +2089,20 @@ fn draw(frame: &mut Frame, app: &mut App) {
             popup,
         );
     }
+    if app.pr_actions {
+        let popup = center(area, 60, 70);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new("v  Approve\nc  Comment\ne  Edit\nm  Merge\na  Abandon\nr  Reactivate\nn  Create a PR\n\nPress an action key. Esc to close.")
+                .block(Block::bordered().title("PR actions")),
+            popup,
+        );
+    }
     if let Some(command) = &app.confirm {
         let operation = match command {
             PrCommand::Merge { id, .. } => format!("Complete/merge PR {id}"),
             PrCommand::Abandon { id, .. } => format!("Abandon PR {id}"),
+            PrCommand::Review { id, .. } => format!("Approve PR {id}"),
             _ => String::new(),
         };
         let popup = center(area, 70, 30);
@@ -2419,6 +2512,61 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn pipeline_editor_focus_errors_and_save_selection() -> Result<()> {
+        let (_root, mut app) = fixture()?;
+        app.screen = Screen::Pipelines(vec![
+            serde_json::json!({"id":7,"name":"Build","folder":""}),
+            serde_json::json!({"id":8,"name":"Other","folder":"/Team"}),
+        ]);
+        app.selection.select(Some(0));
+        app.handle(key(KeyCode::Char('m')))?;
+        let form = app.form.as_ref().context("Expected pipeline editor")?;
+        assert!(matches!(form.kind, FormKind::PipelineEdit(7)));
+        assert_eq!(form.selected, 1);
+        assert_eq!(form.value(0)?, "Build");
+        assert_eq!(form.value(1)?, "/");
+        app.receive((app.generation, Message::Error("Permission denied".into())));
+        assert!(app.form.is_some());
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 35))?;
+        terminal.draw(|frame| draw(frame, &mut app))?;
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Edit pipeline"));
+        assert!(rendered.contains("Permission denied"));
+        app.writing = true;
+        app.handle(key(KeyCode::Esc))?;
+        assert!(app.form.is_some());
+        app.receive((
+            app.generation,
+            Message::PipelineEdited {
+                id: 7,
+                name: "Renamed".into(),
+                folder: "/Z".into(),
+            },
+        ));
+        assert!(app.form.is_none());
+        let Screen::Pipelines(items) = &app.screen else {
+            anyhow::bail!("Expected pipelines");
+        };
+        assert_eq!(
+            items[app.selection.selected().context("Selection missing")?]["id"],
+            7
+        );
+        assert_eq!(items[1]["name"], "Renamed");
+        assert!(app.status.contains("Saved pipeline Renamed"));
+        app.handle(key(KeyCode::Char('e')))?;
+        assert_eq!(app.form.as_ref().context("Expected editor")?.selected, 0);
+        app.handle(key(KeyCode::Esc))?;
+        assert!(app.form.is_none());
+        Ok(())
+    }
+
     fn fixture() -> Result<(tempfile::TempDir, App)> {
         let root = tempfile::tempdir()?;
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -2552,10 +2700,13 @@ mod tests {
         let (_root, mut app) = fixture()?;
         app.screen = Screen::Prs(vec![]);
         app.handle(key(KeyCode::Char('s')))?;
+        assert!(app.settings_menu.is_none());
+        app.screen = Screen::Home;
+        app.handle(key(KeyCode::Char('s')))?;
         assert_eq!(app.settings_menu, Some(0));
         app.handle(key(KeyCode::Tab))?;
         assert_eq!(app.settings_menu, Some(1));
-        assert!(matches!(app.screen, Screen::Prs(_)));
+        assert!(matches!(app.screen, Screen::Home));
         app.handle(key(KeyCode::Enter))?;
         assert!(app.settings_menu.is_none());
         assert!(app.form.is_some());
@@ -2563,7 +2714,7 @@ mod tests {
         app.handle(key(KeyCode::Char('s')))?;
         app.handle(key(KeyCode::Esc))?;
         assert!(app.settings_menu.is_none());
-        assert!(matches!(app.screen, Screen::Prs(_)));
+        assert!(matches!(app.screen, Screen::Home));
         Ok(())
     }
 
@@ -2806,7 +2957,7 @@ mod tests {
         let (_root, mut app) = fixture()?;
         app.screen = Screen::Pr {
             value: json!({
-                "pullRequestId": 7, "title": "Example PR", "description": "Description text",
+                "pullRequestId": 7, "status": "active", "title": "Example PR", "description": "Description text",
                 "reviewers": [{"displayName":"Sam", "vote":10}],
                 "detailThreads": [{"comments":[{"author":{"displayName":"Alex"}, "content":"Visible comment"}, {"isDeleted":true,"content":"Deleted comment"}]}]
             }),
@@ -2853,6 +3004,35 @@ mod tests {
         app.handle(key(KeyCode::Char('n')))?;
         assert!(app.confirm.is_none());
         assert!(app.task.is_none());
+        Ok(())
+    }
+    #[test]
+    fn approval_requires_confirmation_and_an_active_pr() -> Result<()> {
+        let (_root, mut app) = fixture()?;
+        app.attention = true;
+        app.screen = Screen::Pr {
+            value: json!({"pullRequestId":7, "status":"active"}),
+        };
+        app.handle(key(KeyCode::Char('v')))?;
+        assert!(matches!(
+            app.confirm,
+            Some(PrCommand::Review {
+                id: 7,
+                vote: Vote::Approve
+            })
+        ));
+        assert!(app.task.is_none());
+        app.handle(key(KeyCode::Esc))?;
+        assert!(app.confirm.is_none());
+        assert!(app.task.is_none());
+        for status in ["completed", "abandoned"] {
+            app.screen = Screen::Pr {
+                value: json!({"pullRequestId":7, "status":status}),
+            };
+            assert!(app.handle(key(KeyCode::Char('v'))).is_err());
+            assert!(app.confirm.is_none());
+            assert!(app.task.is_none());
+        }
         Ok(())
     }
     #[test]

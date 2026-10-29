@@ -2,14 +2,14 @@
 
 Azure DevOps in your terminal. Review pull requests, watch pipeline logs, and run commands from scripts.
 
-For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps Server. Supports YAML pipelines, pull requests, and empty remote repository creation. No work items or classic pipelines.
+For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps Server. Supports YAML pipelines, pull requests, listing repositories, and creating empty remote repositories. No work items or classic pipelines.
 
 ## Install
 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.3.6
+mise use -g github:DominicWrege/devops-cli@0.3.9
 devops login
 ```
 
@@ -26,7 +26,7 @@ Sign-in uses a personal access token by default (no Entra app registration). Ent
 
 ### Personal access token (PAT)
 
-In Azure DevOps, open **User settings â†’ Personal access tokens â†’ New Token**. Select your organization, a short expiry, and only the scopes you need. Include **Project and Team: Read** for login and project selection, plus appropriate **Code** scopes for PRs/repositories and **Build** scopes for pipelines. Your organization must allow PATs.
+In Azure DevOps, open **User settings**, then **Personal access tokens**, then **New Token**. Select your organization, a short expiry, and only the scopes you need. Include **Project and Team: Read** for login and project selection, plus appropriate **Code** scopes for PRs/repositories and **Build** scopes for pipelines. Your organization must allow PATs.
 
 Run login and enter your token at the hidden prompt:
 
@@ -38,7 +38,7 @@ devops login --org my-org --project my-project
 
 Login verifies project-listing access, then saves the token separately from settings for subsequent CLI/TUI commands. On Windows the saved token is encrypted for your Windows user with DPAPI. Linux/WSL uses an owner-only file; see [storage](#defaults-and-overrides). Tokens are saved per organization, so overriding `--org` never silently uses another organization's saved PAT.
 
-`devops tui` also asks for the organization and a masked token, then lets you select a project. A blank token field reuses the saved token. Organization/project selection is explicit for now; repository autodetection is the next feature, not implemented yet.
+On first launch, `devops tui` asks for the organization and a masked token, then lets you select a project. A blank token field reuses the saved token. Organization/project selection is explicit; Git remote autodetection is not implemented.
 
 For scripts, `DEVOPS_PAT` is an optional override that takes precedence over saved credentials and is never saved by login. Set it through a secret manager or hidden shell input, not a literal token in shell history. Environment variables are available to child processes; do not log or share them. Never pass the token as a command-line argument. Non-interactive commands never prompt for tokens.
 
@@ -68,58 +68,69 @@ This is an early release. Live Windows/WSL sign-in and tenant workflows still ne
 
 ## Use the TUI
 
-The TUI remembers your selected organization and project and opens directly to
-pull requests on subsequent launches. If you are signed in but have no selected
-project, it opens the project picker without asking for your token again.
-Press `s` for Settings, then choose Current project or Account. Project selection
-is remembered for CLI commands too.
-Use `1` / `2` or `Tab` to switch between pull requests and pipelines. Wide terminals
-show a preview beside the pull request list. `Enter` opens the selected item.
-Pipelines opens the live project-wide recent-runs feed by default. It lists the latest
-50 runs from YAML pipelines and refreshes automatically while visible, keeping
-your selected run. Enter opens its timeline and logs; `a` returns to all pipelines.
-
-The pipeline table groups rows by folder and sorts names within each folder.
-The Pipelines view shows recent activity for the selected pipeline beside the list,
-or below it on narrow terminals. Up/Down changes the pipeline; Enter opens its
-runs so you can select one to follow. F5 refreshes activity. Tab and Shift+Tab
-switch views even while reads are loading; submitted writes finish first.
-Use `F6` to focus another pane. Up/Down and PageUp/PageDown scroll the focused
-pane; Left/Right pan long lines and table cells. In the run viewer, F6 cycles
-through tasks, logs, and summary. Scrolling logs pauses follow; `f` resumes it.
-Status glyphs show success (✓), failure (✗), running (▶), canceled (■), and skipped (−).
-
-An animated indicator shows pending requests and elapsed time. Refreshes keep
-existing rows visible; Esc cancels a pending read. Submitted writes wait for server
-confirmation.
-Loaded lists and activity stay cached for this TUI session, so returning to a tab
-is immediate and keeps your selected row. Press F5 for fresh data. Activity loads
-after a short pause when scrolling past pipelines. Run icons distinguish running,
-succeeded, failed, and canceled runs; the text status remains visible.
-
-
 ```sh
 devops tui
 ```
 
+The TUI remembers your selected organization and project and opens directly to
+pull requests on subsequent launches. If you are signed in but have no selected
+project, it opens the project picker without asking for your token again.
+From the main menu, press `s` for Settings, then choose Current project or Account. Project selection
+is remembered for CLI commands too.
+
 | Key | Action |
 | --- | --- |
-| `p` | Pull requests |
-| `i` | Assigned reviews needing attention |
-| `l` | YAML pipelines |
-| `s` | Settings: current project and account |
-| `q` | Quit |
-| Arrow keys, Enter | Select and open an item |
+| `1` or `l` | Pipelines, starting with recent runs |
+| `2` or `p` | Pull requests |
+| `Tab` / `Shift+Tab` | Switch between pipelines and pull requests outside forms |
+| `i` | Toggle assigned reviews needing attention from the PR list; open them from home |
+| `s` | Settings from the main menu: current project and account |
+| Up/Down, `Enter` | Select and open an item |
+| `F6` | Focus another pane |
+| `PageUp` / `PageDown` | Move through the focused list or scroll the focused pane |
+| Left/Right | Pan long lines and table cells; switch tabs in PR details |
 | `F5` | Refresh lists and details |
-| `Esc` | Close a form or return home |
+| `Esc` | Cancel a pending read, close a form, or leave the current view |
+| `q` | Quit outside forms |
+
+Loaded lists and activity stay cached for the TUI session and keep your selected
+row. Press `F5` for fresh data. Refreshes keep existing rows visible, and an
+animated indicator shows pending requests and elapsed time. `Tab` and `Shift+Tab`
+can switch views while reads are loading. Submitted writes wait for server
+confirmation before you can switch views.
+
+Forms use `Tab` to move between fields, `Ctrl+U` to clear a field, and `Enter` to submit.
+
+### Pull requests
+
+Wide terminals show a preview beside the pull request list. `Enter` opens the selected PR.
 
 PR details show a fixed header, description/comments/status tabs, and a review status sidebar on wide terminals. Use Left/Right arrows to switch detail tabs, `F6` to switch pane focus, and Up/Down or `PgUp`/`PgDn` to scroll. `[` and `]` also switch detail tabs. `Esc` returns to the PR list.
 
-In PR details, use `e` to edit, `c` to comment, `m` to merge, `a` to abandon, or `r` to reactivate. Press `n` in the PR list or details to create a PR. Merge and abandon ask for confirmation.
+In PR details, press `v` to approve or `?` to open the actions menu for commenting, editing, merging, abandoning, reactivating, or creating a PR. The existing action shortcuts still work. To approve an assigned review, press `i` in the PR list, open the PR with `Enter`, then press `v`. Approval, merge, and abandon ask for confirmation. Press `n` in the PR list or details to create a PR.
 
-Forms use Tab to move between fields, Ctrl+U to clear a field, and Enter to submit.
+### Pipelines and live logs
 
-For pipelines, choose a pipeline and then a run. Tasks appear on the left; the selected task's logs appear on the right. Arrow keys change selection and pause following. PageUp/PageDown scroll logs. Press `f` to resume following within the selected job.
+Pipelines opens the project-wide recent-runs feed by default. It lists the latest
+50 runs from YAML pipelines and refreshes automatically while visible, keeping
+your selected run. `Enter` opens its timeline and logs; `a` opens all pipelines.
+
+The pipeline list groups rows by folder and sorts names within each folder.
+Recent activity for the selected pipeline appears beside the list, or below it
+on narrow terminals. Up/Down changes the pipeline; `Enter` opens its runs so you
+can select one to follow. Activity loads after a short pause when scrolling past
+pipelines. `F5` refreshes the list and activity; `r` returns to recent runs.
+
+On the pipeline list, `e` opens the name and folder editor; `m` opens it with the
+folder selected. Use `Tab` to switch fields, `Ctrl+U` to clear, `Enter` to save,
+and `Esc` to cancel. A blank folder or `/` moves to the root. Failed saves retain
+your edits; successful saves update the list and keep the pipeline selected.
+
+In the run viewer, tasks appear on the left and the selected task's logs appear
+on the right. `F6` cycles through tasks, logs, and summary. Up/Down and
+`PageUp`/`PageDown` move through tasks or scroll the focused pane. Selecting a task
+or scrolling logs pauses following; `f` resumes it within the selected job.
+Status glyphs show success (✓), failure (✗), running (▶), canceled (■), and skipped (−).
 
 Running tasks use a separate live-console connection. Uploaded logs are still polled
 every two seconds and replace the live tail after the task completes. A new connection
@@ -127,11 +138,11 @@ may begin partway through a task; the uploaded log supplies its complete history
 Connection failures appear in the log pane and retry automatically without stopping
 polling. Background timeline refreshes do not flash a loading indicator.
 
-The pipeline TUI only observes runs. Use the CLI to trigger, retry, cancel, or register pipelines.
+Use the CLI to trigger, rerun, retry, or cancel runs, or to register pipelines.
 
 ## Use the CLI
 
-Commands other than `login` never prompt or open sign-in UI. Lists use bordered tables rendered with `cli-table` by default. Add `--json` to any CLI command
+CLI commands other than `login` never prompt or open sign-in UI. Lists use bordered tables by default. Add `--json` to any CLI command
 for machine-readable output, for example `devops pipeline list --json` or
 `devops --json pr list`. Lists return arrays; resource views return objects;
 `pipeline inspect` returns `run` and `timeline`; logs return an array of lines.
@@ -164,7 +175,10 @@ Votes are `approve`, `approve-with-suggestions`, `reset`, `wait`, and `reject`. 
 
 ```sh
 devops pipeline list
+devops pipeline list --json
 devops pipeline view 12
+devops pipeline rename 12 'Build and test'
+devops pipeline move 12 /Team/CI
 devops pipeline runs 12
 devops pipeline run 12 --branch main --param deploy=false --variable mode=test
 devops pipeline inspect 456
@@ -178,6 +192,10 @@ devops pipeline register --name CI --repo my-repo --yaml /azure-pipelines.yml
 
 Here `12` is a pipeline ID and `456` is a run ID. Registration points to YAML already committed in the repository; it does not create a YAML file.
 
+`pipeline list` shows names and folders. Use `pipeline list --json` to retrieve
+pipeline IDs for other commands. `pipeline move` accepts slash or backslash folder
+paths; use `/` to move a pipeline to the root.
+
 Repeat `--param NAME=VALUE` for parameters. Values can be booleans, numbers, arrays, objects, or strings. `--variable NAME=VALUE` sets non-secret variables only. Never put secrets on the command line.
 
 `rerun` starts a full new run with the previous run's parameters, non-secret variables, and pinned repository versions. It does not preserve skipped-stage choices and refuses secret overrides or non-repository resource inputs. `retry` asks the server to retry eligible failed work; you cannot select individual jobs.
@@ -187,10 +205,14 @@ Repeat `--param NAME=VALUE` for parameters. Values can be booleans, numbers, arr
 ### Repositories
 
 ```sh
+devops repo list
+devops repo list --json
 devops repo create new-repo
 ```
 
-Creates an empty remote repository and prints its URL. No local Git changes or initial commit.
+`repo list` shows project repository names and clone URLs. Add `--json` for full
+repository objects, including IDs. `repo create` creates an empty remote
+repository and prints its URL. It makes no local Git changes or initial commit.
 
 ### Defaults and overrides
 
@@ -204,11 +226,13 @@ devops pr list --org another-org --project another-project
 To save defaults without signing in:
 
 ```sh
-devops init --org my-org --project my-project --client-id APP_UUID
+devops init --org my-org --project my-project
 devops login
 ```
 
-`init` does not discover the tenant. `login` does that when it runs. Add `--tenant-id` to either command only if discovery is unavailable.
+For Entra defaults, add `--client-id APP_UUID` to `init`, then run
+`devops login --entra`. `init` does not discover the tenant; Entra login does.
+Add `--tenant-id` to either command only if discovery is unavailable.
 
 Settings live in `~/.config/devops/settings.json`. On Windows that is `%USERPROFILE%\.config\devops\settings.json`, not AppData.
 
@@ -233,9 +257,4 @@ Writes are not retried automatically. If a request fails or is interrupted, chec
 
 Use `devops --help` or `devops pr --help` for command options.
 
-[Development and releases](docs/development.md) Â· [Acceptance checklist](docs/acceptance.md)
-
-List project repositories with `devops repo list` or `devops repo list --json`.
-Rename a pipeline with `devops pipeline rename ID NAME`, or move it with
-`devops pipeline move ID FOLDER`. In the TUI, `1` opens pipelines and `2` opens
-pull requests. On the pipeline list, `e` edits the name and `m` edits the folder.
+[Development and releases](docs/development.md) | [Acceptance checklist](docs/acceptance.md)

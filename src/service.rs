@@ -795,7 +795,7 @@ impl Service {
             }
             PipelineCommand::List => output::table(
                 &self.pipeline_list().await?,
-                &[("ID", "id"), ("NAME", "name"), ("FOLDER", "folder")],
+                &[("NAME", "name"), ("FOLDER", "folder")],
             ),
             PipelineCommand::View { id } => {
                 let p = self.require_yaml(*id).await?;
