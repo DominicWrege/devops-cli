@@ -92,6 +92,8 @@ pub enum Command {
 
 #[derive(Subcommand, Clone)]
 pub enum RepoCommand {
+    /// List repositories in the project
+    List,
     /// Create an empty remote repository; never modify local Git state
     Create { name: String },
 }
@@ -100,6 +102,7 @@ impl RepoCommand {
     pub fn validate(&self) -> anyhow::Result<()> {
         match self {
             Self::Create { name } => repository(name),
+            Self::List => Ok(()),
         }
     }
 }
@@ -239,6 +242,16 @@ impl MergeStrategy {
 
 #[derive(Subcommand, Clone)]
 pub enum PipelineCommand {
+    /// Rename a pipeline
+    Rename {
+        id: i32,
+        name: String,
+    },
+    /// Move a pipeline to a folder
+    Move {
+        id: i32,
+        folder: String,
+    },
     List,
     View {
         id: i32,
@@ -405,6 +418,17 @@ pub(crate) fn repository(value: &str) -> anyhow::Result<()> {
 impl PipelineCommand {
     pub fn validate(&self) -> anyhow::Result<()> {
         match self {
+            Self::Rename { id, name } => {
+                positive(*id)?;
+                repository(name)?;
+            }
+            Self::Move { id, folder } => {
+                positive(*id)?;
+                nonempty(folder, "Folder")?;
+                if folder.chars().any(char::is_control) {
+                    return Err(crate::error::invalid("Invalid folder"));
+                }
+            }
             Self::Cancel { run, yes } => {
                 acknowledge(*yes)?;
                 positive(*run)?;

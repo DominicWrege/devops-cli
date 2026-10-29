@@ -109,7 +109,9 @@ jobs:
           \`mise use -g github:$GH_REPO@$VERSION\`
 
           Start setup with \`devops login\`. Enter your organization and a personal access token at the masked prompt; no Entra app registration is required. Entra sign-in remains available with \`--entra\`.
-          CLI lists now use bordered cli-table tables. PR details have description, comments, and status tabs, with a review status sidebar on wide terminals. TUI voting has been removed; CLI voting remains available.
+          PR detail tabs now support Left/Right arrow keys. Up/Down scroll content, and F6 switches pane focus. Changing tabs focuses the content pane and resets its scroll position while preserving the sidebar scroll position. The bracket shortcuts remain available. On-screen hints and the README describe the new controls.
+
+          List repositories with \`devops repo list\`. Rename pipelines with \`devops pipeline rename ID NAME\` and move them with \`devops pipeline move ID FOLDER\`. The TUI places Pipelines first and PRs second, adds e to rename and m to move pipelines, and removes refresh interval labels.
 
           Linux uses a static musl binary, with no glibc requirement. ARM64 and macOS builds are not provided.
           Live tenant authentication acceptance is still required. See the README and docs/acceptance.md.

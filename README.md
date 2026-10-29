@@ -76,7 +76,7 @@ is remembered for CLI commands too.
 Use `1` / `2` or `Tab` to switch between pull requests and pipelines. Wide terminals
 show a preview beside the pull request list. `Enter` opens the selected item.
 Pipelines opens the live project-wide recent-runs feed by default. It lists the latest
-50 runs from YAML pipelines and refreshes every 16 seconds while visible, keeping
+50 runs from YAML pipelines and refreshes automatically while visible, keeping
 your selected run. Enter opens its timeline and logs; `a` returns to all pipelines.
 
 The pipeline table groups rows by folder and sorts names within each folder.
@@ -113,7 +113,7 @@ devops tui
 | `F5` | Refresh lists and details |
 | `Esc` | Close a form or return home |
 
-PR details show a fixed header, description/comments/status tabs, and a review status sidebar on wide terminals. Use `[` and `]` to switch detail tabs, `F6` to switch pane focus, and `PgUp`/`PgDn` to scroll. `Esc` returns to the PR list.
+PR details show a fixed header, description/comments/status tabs, and a review status sidebar on wide terminals. Use Left/Right arrows to switch detail tabs, `F6` to switch pane focus, and Up/Down or `PgUp`/`PgDn` to scroll. `[` and `]` also switch detail tabs. `Esc` returns to the PR list.
 
 In PR details, use `e` to edit, `c` to comment, `m` to merge, `a` to abandon, or `r` to reactivate. Press `n` in the PR list or details to create a PR. Merge and abandon ask for confirmation.
 
@@ -234,3 +234,8 @@ Writes are not retried automatically. If a request fails or is interrupted, chec
 Use `devops --help` or `devops pr --help` for command options.
 
 [Development and releases](docs/development.md) Â· [Acceptance checklist](docs/acceptance.md)
+
+List project repositories with `devops repo list` or `devops repo list --json`.
+Rename a pipeline with `devops pipeline rename ID NAME`, or move it with
+`devops pipeline move ID FOLDER`. In the TUI, `1` opens pipelines and `2` opens
+pull requests. On the pipeline list, `e` edits the name and `m` edits the folder.

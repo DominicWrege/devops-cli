@@ -2,6 +2,14 @@
 
 No live Azure DevOps writes have been run by the implementation session. Use an explicitly approved disposable repository, PR, and pipeline for these checks.
 
+## 0.3.8 verification
+
+Windows checks cover 93 Rust tests, formatting, Clippy, and five packaging tests.
+Navigation tests cover arrow-key tab switching, wraparound, content focus,
+scrolling, and bracket shortcuts. The live console test remains ignored.
+Repository listing and pipeline definition preservation have mock API coverage.
+Live tenant and local WSL behavior were not retested for this release.
+
 ## 0.3.7 verification
 
 Local Windows checks cover 90 Rust tests and five packaging tests, formatting,
@@ -40,7 +48,7 @@ Live tenant behavior was not retested for this patch.
 Windows checks cover 81 Rust tests, five packaging tests, formatting, Clippy,
 and the release build. Loading-state tests cover animation, retaining rows during
 refresh, and read cancellation. Tab navigation tests now verify the live pipeline
-view opens by default. Its refresh interval is 16 seconds while visible.
+view opens by default. It refreshes automatically while visible.
 Local WSL testing remains skipped at the user's request.
 
 ## 0.3.3 verification

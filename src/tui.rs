@@ -98,6 +98,8 @@ enum Message {
 }
 
 enum FormKind {
+    PipelineRename(i32),
+    PipelineMove(i32),
     Identity,
     PatIdentity,
     Create,
@@ -197,7 +199,10 @@ impl Form {
                     .map_err(|e| anyhow::anyhow!(e))?,
                 yes: true,
             },
-            FormKind::Identity | FormKind::PatIdentity => anyhow::bail!("Not a PR action"),
+            FormKind::PipelineRename(_)
+            | FormKind::PipelineMove(_)
+            | FormKind::Identity
+            | FormKind::PatIdentity => anyhow::bail!("Not a PR action"),
         })
     }
 }
@@ -774,6 +779,7 @@ impl App {
             }
             Message::Written(message) => {
                 self.pr_cache = None;
+                self.pipeline_cache = None;
                 self.status = format!("{message}\nPress F5 to refresh.");
             }
             Message::Error(message) => {
@@ -836,6 +842,28 @@ impl App {
             self.settings = settings;
             self.form = None;
             return self.sign_in();
+        }
+        if matches!(
+            form.kind,
+            FormKind::PipelineRename(_) | FormKind::PipelineMove(_)
+        ) {
+            let command = match form.kind {
+                FormKind::PipelineRename(id) => crate::cli::PipelineCommand::Rename {
+                    id,
+                    name: form.value(0)?.into(),
+                },
+                FormKind::PipelineMove(id) => crate::cli::PipelineCommand::Move {
+                    id,
+                    folder: form.value(0)?.into(),
+                },
+                _ => anyhow::bail!("Invalid pipeline form"),
+            };
+            command.validate()?;
+            let api = self.api()?;
+            self.form = None;
+            self.launch(async move { Ok(Message::Written(api.pipeline_action(&command).await?)) });
+            self.writing = true;
+            return Ok(());
         }
         let command = form.command()?;
         command.validate()?;
@@ -1057,10 +1085,11 @@ impl App {
         }
         if matches!(self.screen, Screen::Pr { .. }) {
             match key.code {
-                KeyCode::Char('[' | ']') => {
-                    self.pr_tab =
-                        (self.pr_tab + if key.code == KeyCode::Char(']') { 1 } else { 2 }) % 3;
-                    self.pane_y = [0; 3];
+                KeyCode::Left | KeyCode::Right | KeyCode::Char('[' | ']') => {
+                    let next = matches!(key.code, KeyCode::Right | KeyCode::Char(']'));
+                    self.pr_tab = (self.pr_tab + if next { 1 } else { 2 }) % 3;
+                    self.pane_focus = 0;
+                    self.pane_y[0] = 0;
                     return Ok(false);
                 }
                 KeyCode::Up | KeyCode::Char('k') | KeyCode::PageUp => {
@@ -1107,8 +1136,8 @@ impl App {
             )
         {
             let pipelines = match key.code {
-                KeyCode::Char('1') => false,
-                KeyCode::Char('2') => true,
+                KeyCode::Char('2') => false,
+                KeyCode::Char('1') => true,
                 _ => matches!(self.screen, Screen::Prs(_) | Screen::Pr { .. }),
             };
             if pipelines {
@@ -1205,6 +1234,25 @@ impl App {
                 return Ok(false);
             }
         }
+        if !self.writing
+            && let Screen::Pipelines(items) = &self.screen
+            && let KeyCode::Char(action @ ('e' | 'm')) = key.code
+            && let Some(item) = items.get(self.selection.selected().unwrap_or(0))
+        {
+            let id = response_id(item, "id")?;
+            self.form = Some(if action == 'e' {
+                Form::new(
+                    FormKind::PipelineRename(id),
+                    vec![("Pipeline name", text(item, "name").into())],
+                )
+            } else {
+                Form::new(
+                    FormKind::PipelineMove(id),
+                    vec![("Destination folder", text(item, "folder").into())],
+                )
+            });
+            return Ok(false);
+        }
         match key.code {
             KeyCode::Char('r')
                 if matches!(self.screen, Screen::Pipelines(_) | Screen::Recent(_)) =>
@@ -1214,11 +1262,11 @@ impl App {
             KeyCode::Char('a') if matches!(self.screen, Screen::Recent(_)) => {
                 self.load_all_pipelines()?
             }
-            KeyCode::Char('1') => {
+            KeyCode::Char('2') => {
                 self.attention = false;
                 self.load_prs()?;
             }
-            KeyCode::Char('2') => self.load_pipelines()?,
+            KeyCode::Char('1') => self.load_pipelines()?,
             KeyCode::Esc => match self.screen {
                 Screen::Pr { .. } => self.load_prs()?,
                 Screen::Runs { .. } => self.load_all_pipelines()?,
@@ -1548,16 +1596,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             )),
             Line::from(vec![
                 Span::styled(
-                    " 1 ⑂ Pull requests ",
-                    if matches!(app.screen, Screen::Prs(_) | Screen::Pr { .. }) {
-                        Style::default().bg(Color::Cyan).fg(Color::Black).bold()
-                    } else {
-                        Style::default()
-                    },
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    " 2 ▶ Pipelines ",
+                    " 1 ▶ Pipelines ",
                     if matches!(
                         app.screen,
                         Screen::Pipelines(_)
@@ -1570,6 +1609,15 @@ fn draw(frame: &mut Frame, app: &mut App) {
                         Style::default()
                     },
                 ),
+                Span::raw("  "),
+                Span::styled(
+                    " 2 ⑂ Pull requests ",
+                    if matches!(app.screen, Screen::Prs(_) | Screen::Pr { .. }) {
+                        Style::default().bg(Color::Cyan).fg(Color::Black).bold()
+                    } else {
+                        Style::default()
+                    },
+                ),
             ]),
         ])
         .block(Block::default().borders(Borders::BOTTOM)),
@@ -1577,7 +1625,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
     );
     let help = match &mut app.screen {
         Screen::Home => {
-            frame.render_widget(Paragraph::new("Your project is remembered between sessions.\n\n1  Pull requests     Review and manage your team's work\n2  Pipelines         Browse runs and follow logs\ns  Settings          Current project and account\nq  Quit\n\nUse Tab to switch between pull requests and pipelines.\nSelect a row with Up/Down or j/k; press Enter to open it.").block(Block::bordered().title("Home")),layout[1]);
+            frame.render_widget(Paragraph::new("Your project is remembered between sessions.\n\n1  Pipelines         Browse runs and follow logs\n2  Pull requests     Review and manage your team's work\ns  Settings          Current project and account\nq  Quit\n\nUse Tab to switch between pull requests and pipelines.\nSelect a row with Up/Down or j/k; press Enter to open it.").block(Block::bordered().title("Home")),layout[1]);
             "p: PRs   i: assigned reviews   l: pipelines   s: settings   q: quit"
         }
         Screen::Organizations(items) => {
@@ -1675,7 +1723,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 app.pane_focus,
                 app.pane_y,
             );
-            "e: edit   c: comment   m: merge   a: abandon   r: reactivate   n: create\n[/]: tab   F6: focus   PgUp/PgDn: scroll   F5: refresh   Esc: PR list"
+            "e: edit   c: comment   m: merge   a: abandon   r: reactivate   n: create\nLeft/Right: detail tab   F6: focus   Up/Down: scroll   F5: refresh   Esc: PR list"
         }
         Screen::Pipelines(items) => {
             let panes = if layout[1].width >= 90 {
@@ -1764,7 +1812,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 ],
                 &mut app.selection,
             );
-            "r: recent runs (16s refresh)   Up/Down: pipeline   Enter: runs   F5: refresh"
+            "r: recent runs   Up/Down: pipeline   Enter: runs   e: rename   m: move   F5: refresh"
         }
         Screen::Recent(items) => {
             let rows = items
@@ -1798,7 +1846,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             draw_table(
                 frame,
                 layout[1],
-                "Recent runs | newest first | refresh 16s",
+                "Recent runs | newest first",
                 vec!["Status", "Pipeline", "Run", "Branch", "Queued", "Duration"],
                 rows,
                 vec![
@@ -2723,6 +2771,36 @@ mod tests {
         assert!(saved.tenant_id.is_none() && saved.client_id.is_none());
         Ok(())
     }
+    #[test]
+    fn pr_detail_arrows_switch_tabs_and_scroll_the_selected_content() -> Result<()> {
+        let (_root, mut app) = fixture()?;
+        app.screen = Screen::Pr {
+            value: json!({"pullRequestId": 7}),
+        };
+        app.pane_focus = 1;
+        app.pane_y = [10, 5, 0];
+        app.handle(key(KeyCode::Right))?;
+        assert_eq!(app.pr_tab, 1);
+        assert_eq!(app.pane_focus, 0);
+        assert_eq!(app.pane_y, [0, 5, 0]);
+        app.handle(key(KeyCode::Down))?;
+        assert_eq!(app.pane_y[0], 1);
+        app.handle(key(KeyCode::Up))?;
+        assert_eq!(app.pane_y[0], 0);
+        app.handle(key(KeyCode::Left))?;
+        assert_eq!(app.pr_tab, 0);
+        app.handle(key(KeyCode::Left))?;
+        assert_eq!(app.pr_tab, 2);
+        app.handle(key(KeyCode::Right))?;
+        assert_eq!(app.pr_tab, 0);
+        assert_eq!(app.pane_x, [0; 3]);
+        app.handle(key(KeyCode::Char(']')))?;
+        assert_eq!(app.pr_tab, 1);
+        app.handle(key(KeyCode::Char('[')))?;
+        assert_eq!(app.pr_tab, 0);
+        Ok(())
+    }
+
     #[test]
     fn pr_detail_tabs_render_structured_content_at_both_widths() -> Result<()> {
         let (_root, mut app) = fixture()?;

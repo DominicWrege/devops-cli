@@ -174,6 +174,9 @@ async fn run(cli: Cli) -> Result<()> {
     if cli.json {
         let value = match &cli.command {
             Command::Pr { command } => api.pr_json(command).await?,
+            Command::Repo {
+                command: cli::RepoCommand::List,
+            } => serde_json::json!(api.repo_list().await?),
             Command::Pipeline {
                 command: PipelineCommand::Watch { run },
             } => return watch(&api, *run).await,
@@ -187,6 +190,12 @@ async fn run(cli: Cli) -> Result<()> {
     }
     let result = match cli.command {
         Command::Pr { command } => api.pr_action(&command).await?,
+        Command::Repo {
+            command: cli::RepoCommand::List,
+        } => output::table(
+            &api.repo_list().await?,
+            &[("ID", "id"), ("NAME", "name"), ("URL", "remoteUrl")],
+        )?,
         Command::Pipeline {
             command: PipelineCommand::Watch { run },
         } => return watch(&api, run).await,

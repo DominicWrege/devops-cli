@@ -226,6 +226,56 @@ impl Service {
         );
         Ok(())
     }
+    pub async fn repo_list(&self) -> Result<Vec<Value>> {
+        Ok(rows(&call!(
+            self.git()
+                .repositories_client()
+                .list(self.org(), self.project())
+        )?))
+    }
+    pub async fn pipeline_edit(
+        &self,
+        id: i32,
+        name: Option<&str>,
+        folder: Option<&str>,
+    ) -> Result<Value> {
+        if let Some(name) = name {
+            PipelineCommand::Rename {
+                id,
+                name: name.into(),
+            }
+            .validate()?;
+        }
+        if let Some(folder) = folder {
+            PipelineCommand::Move {
+                id,
+                folder: folder.into(),
+            }
+            .validate()?;
+        }
+        self.require_yaml(id).await?;
+        let mut definition = call!(self.build(None).definitions_client().get(
+            self.org(),
+            self.project(),
+            id
+        ))?;
+        if let Some(name) = name {
+            definition["name"] = json!(name);
+        }
+        if let Some(folder) = folder {
+            definition["path"] = json!(format!(
+                "\\{}",
+                folder.replace('/', "\\").trim_matches('\\')
+            ));
+        }
+        let body: ado::build::models::BuildDefinition = serde_json::from_value(definition.clone())?;
+        call!(self.build(Some(definition)).definitions_client().update(
+            self.org(),
+            body,
+            self.project(),
+            id
+        ))
+    }
     pub async fn repo_create(&self, name: &str) -> Result<Value> {
         repository(name)?;
         call!(self.git().repositories_client().create(
@@ -416,6 +466,12 @@ impl Service {
         command.validate()?;
         Ok(match command {
             PipelineCommand::List => json!(self.pipeline_list().await?),
+            PipelineCommand::Rename { id, name } => {
+                self.pipeline_edit(*id, Some(name), None).await?
+            }
+            PipelineCommand::Move { id, folder } => {
+                self.pipeline_edit(*id, None, Some(folder)).await?
+            }
             PipelineCommand::View { id } => self.require_yaml(*id).await?,
             PipelineCommand::Runs { id } => json!(self.runs(*id).await?),
             PipelineCommand::Inspect { run } => {
@@ -729,6 +785,14 @@ impl Service {
     pub async fn pipeline_action(&self, command: &PipelineCommand) -> Result<String> {
         command.validate()?;
         match command {
+            PipelineCommand::Rename { id, name } => {
+                self.pipeline_edit(*id, Some(name), None).await?;
+                Ok(format!("Renamed pipeline {id} to {name}"))
+            }
+            PipelineCommand::Move { id, folder } => {
+                self.pipeline_edit(*id, None, Some(folder)).await?;
+                Ok(format!("Moved pipeline {id} to {folder}"))
+            }
             PipelineCommand::List => output::table(
                 &self.pipeline_list().await?,
                 &[("ID", "id"), ("NAME", "name"), ("FOLDER", "folder")],
@@ -1046,6 +1110,51 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(value))
             .mount(server)
             .await;
+    }
+    #[tokio::test]
+    async fn repository_list_returns_project_repositories() -> Result<()> {
+        let server = MockServer::start().await;
+        mock_get(
+            &server,
+            "/org/project/_apis/git/repositories",
+            json!({"value":[{"id":"repo","name":"demo"}]}),
+        )
+        .await;
+        assert_eq!(api(&server)?.repo_list().await?[0]["name"], "demo");
+        Ok(())
+    }
+    #[tokio::test]
+    async fn pipeline_edit_preserves_definition_and_revision() -> Result<()> {
+        let server = MockServer::start().await;
+        mock_get(
+            &server,
+            "/org/project/_apis/pipelines/7",
+            json!({"id":7,"configuration":{"type":"yaml"}}),
+        )
+        .await;
+        let mut definition = json!({"id":7,"name":"old","path":"\\","revision":4,"queueStatus":"enabled","url":"","project":{"name":"project","visibility":"private"},"process":{"type":2,"yamlFilename":"ci.yml"},"variables":{"key":{"value":"keep"}}});
+        mock_get(
+            &server,
+            "/org/project/_apis/build/definitions/7",
+            definition.clone(),
+        )
+        .await;
+        definition["name"] = json!("new");
+        definition["path"] = json!("\\team\\ci");
+        Mock::given(method("PUT"))
+            .and(path("/org/project/_apis/build/definitions/7"))
+            .and(body_json(definition.clone()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(definition.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert_eq!(
+            api(&server)?
+                .pipeline_edit(7, Some("new"), Some("team/ci"))
+                .await?,
+            definition
+        );
+        Ok(())
     }
     fn pr_fixture() -> Value {
         json!({"pullRequestId":7,"status":"active","repository":{"id":"repo","project":{"id":"project-id"}},"lastMergeSourceCommit":{"commitId":"expected-head"}})
