@@ -9,7 +9,7 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.3.2
+mise use -g github:DominicWrege/devops-cli@0.3.3
 devops login
 ```
 
@@ -115,7 +115,13 @@ The pipeline TUI only observes runs. Use the CLI to trigger, retry, cancel, or r
 
 ## Use the CLI
 
-Commands other than `login` never prompt or open sign-in UI. Output is plain text with tab-separated tables; there is no JSON mode.
+Commands other than `login` never prompt or open sign-in UI. Lists use aligned Markdown-style tables by default. Add `--json` to any CLI command
+for machine-readable output, for example `devops pipeline list --json` or
+`devops --json pr list`. Lists return arrays; resource views return objects;
+`pipeline inspect` returns `run` and `timeline`; logs return an array of lines.
+Action confirmations and login/init return a `message` object. `pipeline watch --json`
+emits one JSON run object per update on separate lines. Errors remain on stderr
+with the existing exit codes. The interactive TUI does not accept `--json`.
 
 ### Pull requests
 

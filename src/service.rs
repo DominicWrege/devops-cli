@@ -386,6 +386,44 @@ impl Service {
         }
         Ok((pr, output::clean(&out)))
     }
+    pub async fn pr_json(&self, command: &PrCommand) -> Result<Value> {
+        command.validate()?;
+        Ok(match command {
+            PrCommand::List {
+                state,
+                repo,
+                reviewer,
+                author,
+            } => json!(
+                self.pr_list(
+                    *state,
+                    repo.as_deref(),
+                    reviewer.as_deref(),
+                    author.as_deref()
+                )
+                .await?
+            ),
+            PrCommand::Status => json!(self.attention_prs().await?),
+            PrCommand::View { id } => self.pr(*id).await?,
+            _ => json!({"message": self.pr_action(command).await?}),
+        })
+    }
+    pub async fn pipeline_json(&self, command: &PipelineCommand) -> Result<Value> {
+        command.validate()?;
+        Ok(match command {
+            PipelineCommand::List => json!(self.pipeline_list().await?),
+            PipelineCommand::View { id } => self.require_yaml(*id).await?,
+            PipelineCommand::Runs { id } => json!(self.runs(*id).await?),
+            PipelineCommand::Inspect { run } => {
+                json!({"run": self.build_run(*run).await?, "timeline": self.timeline(*run).await?})
+            }
+            PipelineCommand::Logs { run, log, start } => {
+                self.build_run(*run).await?;
+                json!(self.log(*run, *log, *start).await?)
+            }
+            _ => json!({"message": self.pipeline_action(command).await?}),
+        })
+    }
     pub async fn pr_action(&self, command: &PrCommand) -> Result<String> {
         command.validate()?;
         match command {
@@ -1047,6 +1085,22 @@ mod tests {
             42
         );
         assert!(api(&server)?.recent_runs(&[]).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pipeline_json_returns_array_without_table_wrapping() -> Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/org/project/_apis/pipelines"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert_eq!(
+            api(&server)?.pipeline_json(&PipelineCommand::List).await?,
+            json!([])
+        );
         Ok(())
     }
 

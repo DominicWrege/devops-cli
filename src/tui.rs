@@ -641,7 +641,7 @@ impl App {
                         .unwrap_or(0);
                     self.screen = Screen::Recent(items);
                     self.selection.select(Some(selected));
-                    self.status = "Updated just now. Auto-refresh every 30 seconds.".into();
+                    self.status.clear();
                 }
             }
             Message::Prs(items) => {

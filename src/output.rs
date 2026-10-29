@@ -28,27 +28,67 @@ pub fn rows(value: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 pub fn table(items: &[Value], columns: &[(&str, &str)]) -> String {
-    let mut result = columns
-        .iter()
-        .map(|(header, _)| *header)
-        .collect::<Vec<_>>()
-        .join("\t");
-    for item in items {
-        result.push('\n');
-        result.push_str(
-            &columns
-                .iter()
-                .map(|(_, key)| cell(&scalar(&item[*key])))
+    let escape = |s: &str| cell(s).replace('\\', "\\\\").replace('|', "\\|");
+    let mut rows = vec![
+        columns
+            .iter()
+            .map(|(header, _)| escape(header))
+            .collect::<Vec<_>>(),
+    ];
+    rows.extend(items.iter().map(|item| {
+        columns
+            .iter()
+            .map(|(_, key)| escape(&scalar(&item[*key])))
+            .collect::<Vec<_>>()
+    }));
+    let widths = (0..columns.len())
+        .map(|i| {
+            rows.iter()
+                .map(|row| row[i].chars().count())
+                .max()
+                .unwrap_or(0)
+                .max(3)
+        })
+        .collect::<Vec<_>>();
+    let format_row = |row: &[String]| {
+        format!(
+            "| {} |",
+            row.iter()
+                .enumerate()
+                .map(|(i, value)| format!(
+                    "{}{}",
+                    value,
+                    " ".repeat(widths[i].saturating_sub(value.chars().count()))
+                ))
                 .collect::<Vec<_>>()
-                .join("\t"),
-        );
-    }
-    result
+                .join(" | ")
+        )
+    };
+    let mut lines = vec![
+        format_row(&rows[0]),
+        format_row(&widths.iter().map(|w| "-".repeat(*w)).collect::<Vec<_>>()),
+    ];
+    lines.extend(rows.iter().skip(1).map(|row| format_row(row)));
+    lines.join("\n")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn markdown_table_aligns_and_escapes_cells() {
+        let result = table(
+            &[serde_json::json!({"id":7,"name":"a|b\nc"})],
+            &[("ID", "id"), ("NAME", "name")],
+        );
+        assert!(result.starts_with("| ID  | NAME"));
+        assert!(result.contains("| --- |"));
+        assert!(result.contains("a\\|b c"));
+        assert_eq!(result.lines().count(), 3);
+        let empty = table(&[], &[("ID", "id")]);
+        assert_eq!(empty, "| ID  |\n| --- |");
+    }
+
     #[test]
     fn removes_terminal_controls() {
         assert_eq!(clean("hi\x1b[31m\r\0bye\n"), "hi[31mbye\n");

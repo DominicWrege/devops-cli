@@ -26,11 +26,14 @@ use clap::Parser;
 use cli::{Cli, Command, PipelineCommand};
 use config::{AuthMethod, Store};
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+static JSON_OUTPUT: AtomicBool = AtomicBool::new(false);
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
+    JSON_OUTPUT.store(cli.json, Ordering::Relaxed);
     match run(cli).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
@@ -52,7 +55,18 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
+fn emit_json(value: &serde_json::Value) -> Result<()> {
+    let mut out = std::io::stdout().lock();
+    serde_json::to_writer(&mut out, value)?;
+    writeln!(out)?;
+    out.flush()?;
+    Ok(())
+}
+
 fn emit(text: &str) -> Result<()> {
+    if JSON_OUTPUT.load(Ordering::Relaxed) {
+        return emit_json(&serde_json::json!({"message": text}));
+    }
     let mut out = std::io::stdout().lock();
     writeln!(out, "{}", output::clean(text))?;
     out.flush()?;
@@ -60,6 +74,11 @@ fn emit(text: &str) -> Result<()> {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    if cli.json && matches!(cli.command, Command::Tui) {
+        return Err(error::invalid(
+            "--json is available for CLI commands, not the TUI",
+        ));
+    }
     let store = Store::home()?;
     let mut settings = store.load()?;
     match &cli.command {
@@ -86,6 +105,9 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Tui => return tui::run(store, settings, cli.org, cli.project).await,
         Command::Config => {
+            if cli.json {
+                return emit_json(&serde_json::to_value(&settings)?);
+            }
             return emit(&format!(
                 "Organization: {}\nProject: {}\nTenant ID: {}\nClient ID: {}\nAuthentication: {}",
                 settings.organization.as_deref().unwrap_or(""),
@@ -148,6 +170,20 @@ async fn run(cli: Cli) -> Result<()> {
     let credential = auth::Credential::new(store, identity)?;
     credential.authenticate().await?; // Authentication failures have a stable non-interactive exit code.
     let api = service::Service::new(credential, target)?;
+    if cli.json {
+        let value = match &cli.command {
+            Command::Pr { command } => api.pr_json(command).await?,
+            Command::Pipeline {
+                command: PipelineCommand::Watch { run },
+            } => return watch(&api, *run).await,
+            Command::Pipeline { command } => api.pipeline_json(command).await?,
+            Command::Repo {
+                command: cli::RepoCommand::Create { name },
+            } => api.repo_create(name).await?,
+            _ => anyhow::bail!("Local command was not handled"),
+        };
+        return emit_json(&value);
+    }
     let result = match cli.command {
         Command::Pr { command } => api.pr_action(&command).await?,
         Command::Pipeline {
@@ -253,7 +289,11 @@ async fn login(
     let (notify, mut messages) = tokio::sync::mpsc::unbounded_channel::<String>();
     let printer = tokio::spawn(async move {
         while let Some(message) = messages.recv().await {
-            emit(&message)?;
+            if JSON_OUTPUT.load(Ordering::Relaxed) {
+                eprintln!("{}", output::clean(&message));
+            } else {
+                emit(&message)?;
+            }
         }
         Ok::<_, anyhow::Error>(())
     });
@@ -299,7 +339,11 @@ async fn watch(api: &service::Service, run: i32) -> Result<()> {
         let build = api.build_run(run).await?;
         let summary = service::build_summary(&build);
         if summary != previous {
-            emit(&summary)?;
+            if JSON_OUTPUT.load(Ordering::Relaxed) {
+                emit_json(&build)?;
+            } else {
+                emit(&summary)?;
+            }
             previous = summary;
         }
         if build["status"] == "completed" {

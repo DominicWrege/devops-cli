@@ -11,6 +11,12 @@ pub struct Cli {
     pub org: Option<String>,
     #[arg(long, global = true, help = "Project for this command; saved by login")]
     pub project: Option<String>,
+    #[arg(
+        long,
+        global = true,
+        help = "Print JSON instead of human-readable output"
+    )]
+    pub json: bool,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -440,8 +446,8 @@ impl PipelineCommand {
 mod tests {
     use super::*;
     #[test]
-    fn no_json_or_interactive_cli() {
-        assert!(Cli::try_parse_from(["devops", "pr", "list", "--json"]).is_err());
+    fn json_supported_without_interactive_cli() {
+        assert!(Cli::try_parse_from(["devops", "pr", "list", "--json"]).is_ok());
         assert!(Cli::try_parse_from(["devops", "auth", "login"]).is_err());
     }
     #[test]

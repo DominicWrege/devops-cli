@@ -23,7 +23,7 @@ fn help_is_text_only_and_has_expected_commands() -> anyhow::Result<()> {
         .stdout(predicate::str::contains("login"))
         .stdout(predicate::str::contains("pipeline"))
         .stdout(predicate::str::contains("tui"))
-        .stdout(predicate::str::contains("--json").not());
+        .stdout(predicate::str::contains("--json"));
     Ok(())
 }
 #[test]
@@ -83,16 +83,17 @@ fn tui_refuses_redirected_input_without_altering_terminal() -> anyhow::Result<()
     Ok(())
 }
 #[test]
-fn no_json_output_option_or_removed_auth_command() -> anyhow::Result<()> {
+fn json_output_and_removed_auth_command() -> anyhow::Result<()> {
     let home = tempfile::tempdir()?;
     command(home.path())
         .args(["auth", "status"])
         .assert()
         .code(2);
     command(home.path())
-        .args(["pr", "list", "--json"])
+        .args(["config", "--json"])
         .assert()
-        .code(2);
+        .success()
+        .stdout(predicate::str::contains("\"auth\":\"pat\""));
     Ok(())
 }
 
@@ -259,5 +260,27 @@ fn pat_flag_conflicts_with_entra_parameters() -> anyhow::Result<()> {
                 .stderr(predicate::str::contains("cannot be used with"));
         }
     }
+    Ok(())
+}
+
+#[test]
+fn json_config_is_parseable_and_tui_rejects_json() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    for args in [["--json", "config"], ["config", "--json"]] {
+        let result = command(home.path()).args(args).assert().success();
+        let value: serde_json::Value = serde_json::from_slice(&result.get_output().stdout)?;
+        assert_eq!(value["auth"], "pat");
+        assert!(value.get("message").is_none());
+    }
+    command(home.path())
+        .args(["tui", "--json"])
+        .assert()
+        .code(2)
+        .stdout("");
+    command(home.path())
+        .args(["pr", "abandon", "7", "--json"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--yes"));
     Ok(())
 }

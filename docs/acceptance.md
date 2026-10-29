@@ -2,6 +2,13 @@
 
 No live Azure DevOps writes have been run by the implementation session. Use an explicitly approved disposable repository, PR, and pipeline for these checks.
 
+## 0.3.3 verification
+
+Windows checks cover 79 Rust tests, five packaging tests, formatting, Clippy,
+and the release build. New coverage verifies Markdown table escaping/alignment,
+JSON array output, global flag placement, parseable configuration JSON, TUI flag
+rejection, and write safeguards in JSON mode. Local WSL testing remains skipped.
+
 ## 0.3.2 verification
 
 Windows verification passes 76 Rust tests, five release-packaging tests, formatting,
