@@ -9,7 +9,7 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.3.3
+mise use -g github:DominicWrege/devops-cli@0.3.4
 devops login
 ```
 
@@ -75,8 +75,8 @@ Press `s` for Settings, then choose Current project or Account. Project selectio
 is remembered for CLI commands too.
 Use `1` / `2` or `Tab` to switch between pull requests and pipelines. Wide terminals
 show a preview beside the pull request list. `Enter` opens the selected item.
-In Pipelines, press `r` for the project-wide recent-runs feed. It lists the latest
-50 runs from YAML pipelines and refreshes every 30 seconds while visible, keeping
+Pipelines opens the live project-wide recent-runs feed by default. It lists the latest
+50 runs from YAML pipelines and refreshes every 16 seconds while visible, keeping
 your selected run. Enter opens its timeline and logs; `a` returns to all pipelines.
 
 The pipeline table groups rows by folder and sorts names within each folder.
@@ -84,6 +84,14 @@ The Pipelines view shows recent activity for the selected pipeline beside the li
 or below it on narrow terminals. Up/Down changes the pipeline; Enter opens its
 runs so you can select one to follow. F5 refreshes activity. Tab and Shift+Tab
 switch views even while reads are loading; submitted writes finish first.
+Use `F6` to focus another pane. Up/Down and PageUp/PageDown scroll the focused
+pane; Left/Right pan long lines and table cells. In the run viewer, F6 cycles
+through tasks, logs, and summary. Scrolling logs pauses follow; `f` resumes it.
+Status glyphs show success (✓), failure (✗), running (▶), canceled (■), and skipped (−).
+
+An animated indicator shows pending requests and elapsed time. Refreshes keep
+existing rows visible; Esc cancels a pending read. Submitted writes wait for server
+confirmation.
 Loaded lists and activity stay cached for this TUI session, so returning to a tab
 is immediate and keeps your selected row. Press F5 for fresh data. Activity loads
 after a short pause when scrolling past pipelines. Run icons distinguish running,

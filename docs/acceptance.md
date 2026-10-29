@@ -2,6 +2,14 @@
 
 No live Azure DevOps writes have been run by the implementation session. Use an explicitly approved disposable repository, PR, and pipeline for these checks.
 
+## 0.3.4 verification
+
+Windows checks cover 81 Rust tests, five packaging tests, formatting, Clippy,
+and the release build. Loading-state tests cover animation, retaining rows during
+refresh, and read cancellation. Tab navigation tests now verify the live pipeline
+view opens by default. Its refresh interval is 16 seconds while visible.
+Local WSL testing remains skipped at the user's request.
+
 ## 0.3.3 verification
 
 Windows checks cover 79 Rust tests, five packaging tests, formatting, Clippy,

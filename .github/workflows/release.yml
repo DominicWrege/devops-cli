@@ -109,7 +109,7 @@ jobs:
           \`mise use -g github:$GH_REPO@$VERSION\`
 
           Start setup with \`devops login\`. Enter your organization and a personal access token at the masked prompt; no Entra app registration is required. Entra sign-in remains available with \`--entra\`.
-          This release uses aligned Markdown-style tables for CLI lists and adds --json for machine-readable output. Lists return JSON arrays, reads return structured data, and action confirmations return message objects. Pipeline watch emits one JSON object per update. The TUI refresh status sentence has been removed; recent runs still refresh every 30 seconds.
+          This release adds an animated TUI loading indicator with elapsed time and keeps existing rows visible during refreshes. Pipelines now opens the live recent-runs view by default and refreshes every 16 seconds while visible. Press a for all pipelines, F5 to refresh immediately, or Esc to cancel a pending read. Submitted writes wait for server confirmation. F6 selects a pane, arrow keys pan long lines, and PageUp/PageDown scroll. Timeline rows now use compact status glyphs.
 
           Linux uses a static musl binary, with no glibc requirement. ARM64 and macOS builds are not provided.
           Live tenant authentication acceptance is still required. See the README and docs/acceptance.md.

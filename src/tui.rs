@@ -218,12 +218,17 @@ struct App {
     screen: Screen,
     selection: ListState,
     detail_scroll: u16,
+    pane_focus: usize,
+    pane_x: [u16; 3],
+    pane_y: [u16; 3],
     form: Option<Form>,
     confirm: Option<PrCommand>,
     settings_menu: Option<usize>,
     status: String,
     task: Option<JoinHandle<()>>,
     writing: bool,
+    loading_since: Option<Instant>,
+    loading_label: &'static str,
     activity: Vec<Value>,
     activity_pipeline: Option<i32>,
     pr_cache: Option<(Target, bool, Vec<Value>)>,
@@ -261,12 +266,17 @@ impl App {
             screen: Screen::Home,
             selection: ListState::default().with_selected(Some(0)),
             detail_scroll: 0,
+            pane_focus: 0,
+            pane_x: [0; 3],
+            pane_y: [0; 3],
             form: None,
             confirm: None,
             settings_menu: None,
             status: String::new(),
             task: None,
             writing: false,
+            loading_since: None,
+            loading_label: "Loading",
             activity: Vec::new(),
             activity_pipeline: None,
             pr_cache: None,
@@ -343,6 +353,7 @@ impl App {
         )
     }
     fn cancel_task(&mut self) {
+        self.loading_since = None;
         self.activity_due = None;
         self.writing = false;
         self.generation = self.generation.wrapping_add(1);
@@ -358,6 +369,14 @@ impl App {
         let generation = self.generation;
         let tx = self.tx.clone();
         self.status = "Loading...".into();
+        self.loading_since = Some(Instant::now());
+        self.loading_label = match self.screen {
+            Screen::Prs(_) => "Loading pull requests",
+            Screen::Pipelines(_) => "Loading pipelines",
+            Screen::Recent(_) => "Refreshing recent runs",
+            Screen::Watch(_) => "Updating timeline and logs",
+            _ => "Loading from Azure DevOps",
+        };
         self.task = Some(tokio::spawn(async move {
             let message = match future.await {
                 Ok(message) => message,
@@ -382,6 +401,9 @@ impl App {
         self.screen = screen;
         self.selection = ListState::default().with_selected(Some(selected));
         self.detail_scroll = 0;
+        self.pane_focus = 0;
+        self.pane_x = [0; 3];
+        self.pane_y = [0; 3];
     }
     fn identity_form(&mut self) {
         if auth::uses_pat(&self.settings) {
@@ -463,7 +485,9 @@ impl App {
         }
         let api = self.api()?;
         let attention = self.attention;
-        self.set_screen(Screen::Prs(Vec::new()));
+        if !matches!(self.screen, Screen::Prs(_)) {
+            self.set_screen(Screen::Prs(Vec::new()));
+        }
         self.launch(async move {
             Ok(Message::Prs(if attention {
                 api.attention_prs().await?
@@ -486,7 +510,7 @@ impl App {
         if !matches!(self.screen, Screen::Recent(_)) {
             self.set_screen(Screen::Recent(Vec::new()));
         }
-        self.recent_due = Instant::now() + Duration::from_secs(30);
+        self.recent_due = Instant::now() + Duration::from_secs(16);
         self.launch(async move {
             let pipelines = match pipelines {
                 Some(values) => values,
@@ -497,6 +521,9 @@ impl App {
         Ok(())
     }
     fn load_pipelines(&mut self) -> Result<()> {
+        self.load_recent()
+    }
+    fn load_all_pipelines(&mut self) -> Result<()> {
         let target = self
             .settings
             .target(self.org.as_deref(), self.project.as_deref())?;
@@ -510,9 +537,11 @@ impl App {
             return self.load_activity();
         }
         let api = self.api()?;
-        self.set_screen(Screen::Pipelines(Vec::new()));
-        self.activity.clear();
-        self.activity_pipeline = None;
+        if !matches!(self.screen, Screen::Pipelines(_)) {
+            self.set_screen(Screen::Pipelines(Vec::new()));
+            self.activity.clear();
+            self.activity_pipeline = None;
+        }
         self.launch(async move { Ok(Message::Pipelines(api.pipeline_list().await?)) });
         Ok(())
     }
@@ -551,6 +580,7 @@ impl App {
                 values: api.runs(pipeline).await?,
             })
         });
+        self.loading_label = "Loading pipeline activity";
         Ok(())
     }
     fn load_pr(&mut self, id: i32) -> Result<()> {
@@ -575,6 +605,7 @@ impl App {
         let api = self.api()?;
         self.launch(async move { Ok(Message::Written(api.pr_action(&command).await?)) });
         self.writing = true;
+        self.loading_label = "Saving changes";
         Ok(())
     }
     fn poll(&mut self) -> Result<()> {
@@ -615,6 +646,7 @@ impl App {
             return;
         }
         self.task = None;
+        self.loading_since = None;
         self.writing = false;
         self.status = String::new();
         match message {
@@ -891,7 +923,7 @@ impl App {
             Screen::Recent(_) => self.load_recent()?,
             Screen::Prs(_) => self.load_prs()?,
             Screen::Pr { value, .. } => self.load_pr(response_id(value, "pullRequestId")?)?,
-            Screen::Pipelines(_) => self.load_pipelines()?,
+            Screen::Pipelines(_) => self.load_all_pipelines()?,
             Screen::Runs { pipeline, .. } => {
                 let id = *pipeline;
                 self.load_runs(id)?;
@@ -978,6 +1010,24 @@ impl App {
         if key.code == KeyCode::Char('q') {
             return Ok(true);
         }
+        if key.code == KeyCode::F(6) {
+            let panes = match self.screen {
+                Screen::Watch(_) => 3,
+                Screen::Prs(_) | Screen::Pipelines(_) => 2,
+                _ => 1,
+            };
+            self.pane_focus = (self.pane_focus + 1) % panes;
+            return Ok(false);
+        }
+        if matches!(key.code, KeyCode::Left | KeyCode::Right) {
+            let offset = &mut self.pane_x[self.pane_focus];
+            *offset = if key.code == KeyCode::Left {
+                offset.saturating_sub(8)
+            } else {
+                offset.saturating_add(8)
+            };
+            return Ok(false);
+        }
         // Switch views before the loading guard; never interrupt a submitted write.
         if matches!(
             key.code,
@@ -1005,6 +1055,11 @@ impl App {
             }
             return Ok(false);
         }
+        if key.code == KeyCode::Esc && self.task.is_some() && !self.writing {
+            self.cancel_task();
+            self.status = "Loading canceled. F5 to retry.".into();
+            return Ok(false);
+        }
         // Keep navigation responsive while polling, but don't overlap writes or setup.
         if self.task.is_some()
             && !matches!(
@@ -1016,10 +1071,18 @@ impl App {
         }
         if let Screen::Watch(viewer) = &mut self.screen {
             match key.code {
-                KeyCode::Up | KeyCode::Char('k') => viewer.navigate(-1),
-                KeyCode::Down | KeyCode::Char('j') => viewer.navigate(1),
-                KeyCode::PageUp => viewer.scroll(-20),
-                KeyCode::PageDown => viewer.scroll(20),
+                KeyCode::Up | KeyCode::Char('k') if self.pane_focus == 0 => viewer.navigate(-1),
+                KeyCode::Down | KeyCode::Char('j') if self.pane_focus == 0 => viewer.navigate(1),
+                KeyCode::Up | KeyCode::Char('k') if self.pane_focus == 1 => viewer.scroll(-1),
+                KeyCode::Down | KeyCode::Char('j') if self.pane_focus == 1 => viewer.scroll(1),
+                KeyCode::PageUp if self.pane_focus == 0 => viewer.navigate(-20),
+                KeyCode::PageDown if self.pane_focus == 0 => viewer.navigate(20),
+                KeyCode::PageUp if self.pane_focus == 1 => viewer.scroll(-20),
+                KeyCode::PageDown if self.pane_focus == 1 => viewer.scroll(20),
+                KeyCode::Up | KeyCode::PageUp => self.pane_y[2] = self.pane_y[2].saturating_sub(1),
+                KeyCode::Down | KeyCode::PageDown => {
+                    self.pane_y[2] = self.pane_y[2].saturating_add(1)
+                }
                 KeyCode::Char('f') => viewer.resume(),
                 KeyCode::Esc => {
                     self.cancel_task();
@@ -1030,6 +1093,55 @@ impl App {
             }
             return Ok(false);
         }
+        if self.pane_focus == 0 && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+            let count = match &self.screen {
+                Screen::Prs(items)
+                | Screen::Pipelines(items)
+                | Screen::Recent(items)
+                | Screen::Projects(items)
+                | Screen::Organizations(items) => Some(items.len()),
+                Screen::Runs { values, .. } => Some(values.len()),
+                _ => None,
+            };
+            if let Some(count) = count {
+                let selected = self.selection.selected().unwrap_or(0);
+                let selected = if key.code == KeyCode::PageUp {
+                    selected.saturating_sub(20)
+                } else {
+                    selected.saturating_add(20).min(count.saturating_sub(1))
+                };
+                self.selection.select(Some(selected));
+                if matches!(self.screen, Screen::Pipelines(_)) {
+                    self.load_activity()?;
+                }
+                return Ok(false);
+            }
+        }
+        if self.pane_focus == 1 && matches!(self.screen, Screen::Prs(_) | Screen::Pipelines(_)) {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.detail_scroll = self.detail_scroll.saturating_sub(1)
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.detail_scroll = self.detail_scroll.saturating_add(1)
+                }
+                KeyCode::PageUp => self.detail_scroll = self.detail_scroll.saturating_sub(20),
+                KeyCode::PageDown => self.detail_scroll = self.detail_scroll.saturating_add(20),
+                KeyCode::Home => self.detail_scroll = 0,
+                _ => {}
+            }
+            if matches!(
+                key.code,
+                KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Char('j' | 'k')
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+                    | KeyCode::Home
+            ) {
+                return Ok(false);
+            }
+        }
         match key.code {
             KeyCode::Char('r')
                 if matches!(self.screen, Screen::Pipelines(_) | Screen::Recent(_)) =>
@@ -1037,7 +1149,7 @@ impl App {
                 self.load_recent()?
             }
             KeyCode::Char('a') if matches!(self.screen, Screen::Recent(_)) => {
-                self.load_pipelines()?
+                self.load_all_pipelines()?
             }
             KeyCode::Char('1') => {
                 self.attention = false;
@@ -1046,7 +1158,7 @@ impl App {
             KeyCode::Char('2') => self.load_pipelines()?,
             KeyCode::Esc => match self.screen {
                 Screen::Pr { .. } => self.load_prs()?,
-                Screen::Runs { .. } => self.load_pipelines()?,
+                Screen::Runs { .. } => self.load_all_pipelines()?,
                 _ => self.set_screen(Screen::Home),
             },
             KeyCode::Char('p') => {
@@ -1155,7 +1267,7 @@ pub async fn run(
             && let Err(error) = app.load_recent()
         {
             app.status = error.to_string();
-            app.recent_due = Instant::now() + Duration::from_secs(30);
+            app.recent_due = Instant::now() + Duration::from_secs(16);
         }
         if app.activity_due.is_some_and(|due| Instant::now() >= due) {
             app.activity_due = None;
@@ -1177,7 +1289,37 @@ pub async fn run(
     Ok(())
 }
 
+fn loading_text(label: &str, elapsed: Duration, writing: bool) -> String {
+    let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let spinner = frames[((elapsed.as_millis() / 100) % frames.len() as u128) as usize];
+    let hint = if writing {
+        "Waiting for server confirmation"
+    } else {
+        "Tab: switch view · Esc: cancel"
+    };
+    let waiting = if elapsed.as_secs() >= 8 {
+        " · Waiting for Azure DevOps"
+    } else {
+        ""
+    };
+    format!(
+        "{spinner} {label} · {}s{waiting}   {hint}",
+        elapsed.as_secs()
+    )
+}
+
 fn draw(frame: &mut Frame, app: &mut App) {
+    let loading = app
+        .loading_since
+        .filter(|_| app.task.is_some())
+        .map(|since| loading_text(app.loading_label, since.elapsed(), app.writing));
+    let status_text = match &loading {
+        Some(message) if !app.status.is_empty() && app.status != "Loading..." => {
+            format!("{message}\n{}", app.status)
+        }
+        Some(message) => message.clone(),
+        None => app.status.clone(),
+    };
     let area = frame.area();
     let layout = Layout::vertical([
         Constraint::Length(4),
@@ -1240,6 +1382,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                     .map(|v| text(v, "accountName").into())
                     .collect(),
                 &mut app.selection,
+                app.pane_x[0],
             );
             "Up/Down: select   Enter: continue   Esc: home"
         }
@@ -1250,6 +1393,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 "Choose current project (remembered next time)",
                 items.iter().map(|v| text(v, "name").into()).collect(),
                 &mut app.selection,
+                app.pane_x[0],
             );
             "Up/Down: select   Enter: use and remember   Esc: cancel"
         }
@@ -1278,7 +1422,15 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 frame.render_widget(
                     Paragraph::new(output::clean(&preview))
                         .wrap(Wrap { trim: false })
-                        .block(Block::bordered().title("Preview")),
+                        .block(
+                            Block::bordered()
+                                .border_style(if app.pane_focus == 1 {
+                                    Style::default().fg(Color::Cyan)
+                                } else {
+                                    Style::default()
+                                })
+                                .title("Preview"),
+                        ),
                     panes[1],
                 );
             }
@@ -1302,6 +1454,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                     })
                     .collect(),
                 &mut app.selection,
+                app.pane_x[0],
             );
             "Enter: view   n: create   i: toggle assigned reviews   F5: refresh   Esc: home"
         }
@@ -1309,7 +1462,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             frame.render_widget(
                 Paragraph::new(detail.as_str())
                     .wrap(Wrap { trim: false })
-                    .scroll((app.detail_scroll, 0))
+                    .scroll((app.detail_scroll, app.pane_x[0]))
                     .block(Block::bordered().title("Pull request")),
                 layout[1],
             );
@@ -1329,7 +1482,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 .unwrap_or("Select a pipeline");
             let activity = if app.activity.is_empty() {
                 if app.task.is_some() || app.activity_due.is_some() {
-                    "Loading recent runs...".into()
+                    loading
+                        .clone()
+                        .unwrap_or_else(|| "Preparing activity...".into())
                 } else if !app.status.is_empty() {
                     "Could not load activity. Press F5 to retry.".into()
                 } else {
@@ -1356,6 +1511,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             frame.render_widget(
                 Paragraph::new(output::clean(&activity))
                     .wrap(Wrap { trim: false })
+                    .scroll((app.detail_scroll, app.pane_x[1]))
                     .block(Block::bordered().title(output::cell(&format!("Activity | {name}")))),
                 panes[1],
             );
@@ -1370,11 +1526,19 @@ fn draw(frame: &mut Frame, app: &mut App) {
                         String::new()
                     };
                     previous_folder = folder;
-                    Row::new(vec![
-                        output::cell(&group),
-                        output::cell(text(v, "name")),
-                        scalar(&v["id"]),
-                    ])
+                    Row::new(
+                        vec![
+                            output::cell(&group),
+                            output::cell(text(v, "name")),
+                            scalar(&v["id"]),
+                        ]
+                        .into_iter()
+                        .map(|cell| {
+                            cell.chars()
+                                .skip(app.pane_x[0] as usize)
+                                .collect::<String>()
+                        }),
+                    )
                 })
                 .collect();
             draw_table(
@@ -1390,7 +1554,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 ],
                 &mut app.selection,
             );
-            "r: recent runs (30s refresh)   Up/Down: pipeline   Enter: runs   F5: refresh"
+            "r: recent runs (16s refresh)   Up/Down: pipeline   Enter: runs   F5: refresh"
         }
         Screen::Recent(items) => {
             let rows = items
@@ -1401,19 +1565,29 @@ fn draw(frame: &mut Frame, app: &mut App) {
                     } else {
                         text(run, "result")
                     };
-                    Row::new(vec![
-                        format!("{} {}", run_icon(run), output::cell(status)),
-                        output::cell(text(&run["definition"], "name")),
-                        output::cell(text(run, "buildNumber")),
-                        output::cell(text(run, "sourceBranch").trim_start_matches("refs/heads/")),
-                        output::cell(text(run, "queueTime")),
-                    ])
+                    Row::new(
+                        vec![
+                            format!("{} {}", run_icon(run), output::cell(status)),
+                            output::cell(text(&run["definition"], "name")),
+                            output::cell(text(run, "buildNumber")),
+                            output::cell(
+                                text(run, "sourceBranch").trim_start_matches("refs/heads/"),
+                            ),
+                            output::cell(text(run, "queueTime")),
+                        ]
+                        .into_iter()
+                        .map(|cell| {
+                            cell.chars()
+                                .skip(app.pane_x[0] as usize)
+                                .collect::<String>()
+                        }),
+                    )
                 })
                 .collect();
             draw_table(
                 frame,
                 layout[1],
-                "Recent runs | newest first | refresh 30s",
+                "Recent runs | newest first | refresh 16s",
                 vec!["Status", "Pipeline", "Run", "Branch", "Queued"],
                 rows,
                 vec![
@@ -1445,18 +1619,40 @@ fn draw(frame: &mut Frame, app: &mut App) {
                     })
                     .collect(),
                 &mut app.selection,
+                app.pane_x[0],
             );
             "Enter: observe   F5: refresh   Esc: home"
         }
         Screen::Watch(viewer) => {
-            draw_viewer(frame, layout[1], viewer);
-            "Up/Down: select task/job   PgUp/PgDn: scroll logs   f: resume following   Esc: home"
+            draw_viewer(
+                frame,
+                layout[1],
+                viewer,
+                app.pane_focus,
+                app.pane_x,
+                app.pane_y,
+            );
+            "F6: tasks / logs / summary   ↑↓ PgUp/PgDn: scroll   ←→: horizontal   f: follow   Esc: back"
         }
     };
+    let empty = match &app.screen {
+        Screen::Prs(items) | Screen::Pipelines(items) | Screen::Recent(items) => items.is_empty(),
+        _ => false,
+    };
+    if empty && let Some(message) = &loading {
+        frame.render_widget(Clear, layout[1]);
+        frame.render_widget(
+            Paragraph::new(message.as_str())
+                .wrap(Wrap { trim: false })
+                .style(Style::default().fg(Color::Cyan))
+                .block(Block::bordered().title("Loading")),
+            layout[1],
+        );
+    }
     frame.render_widget(
         Paragraph::new(output::clean(&format!(
-            "{help}   s: settings\n{}",
-            app.status
+            "{help}   F6: pane   ←→: scroll   s: settings\n{}",
+            status_text
         )))
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::TOP)),
@@ -1479,6 +1675,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             "Settings | Enter: open  Esc: close",
             rows,
             &mut state,
+            0,
         );
     }
     if let Some(form) = &app.form {
@@ -1602,6 +1799,8 @@ fn run_icon(run: &Value) -> &'static str {
     ) {
         (_, "succeeded") => "✓",
         (_, "failed") => "✗",
+        (_, "succeededWithIssues" | "partiallySucceeded") => "⚠",
+        (_, "skipped") => "−",
         (_, "canceled") => "■",
         ("inProgress", _) => "▶",
         _ => "○",
@@ -1614,13 +1813,22 @@ fn draw_list(
     title: &str,
     items: Vec<String>,
     state: &mut ListState,
+    horizontal: u16,
 ) {
     let items = if items.is_empty() {
         vec![ListItem::new("No items")]
     } else {
         items
             .into_iter()
-            .map(|s| ListItem::new(output::clean(&s)))
+            .map(|s| {
+                ListItem::new(
+                    output::clean(&s)
+                        .lines()
+                        .map(|line| line.chars().skip(horizontal as usize).collect::<String>())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            })
             .collect()
     };
     frame.render_stateful_widget(
@@ -1632,7 +1840,14 @@ fn draw_list(
         state,
     );
 }
-fn draw_viewer(frame: &mut Frame, area: Rect, viewer: &mut Viewer) {
+fn draw_viewer(
+    frame: &mut Frame,
+    area: Rect,
+    viewer: &mut Viewer,
+    focus: usize,
+    horizontal: [u16; 3],
+    vertical: [u16; 3],
+) {
     let panes = Layout::vertical([Constraint::Length(8), Constraint::Min(1)]).split(area);
     let elapsed = viewer.run["startTime"]
         .as_str()
@@ -1655,11 +1870,16 @@ fn draw_viewer(frame: &mut Frame, area: Rect, viewer: &mut Viewer) {
             "{}\nElapsed: {elapsed}",
             build_summary(&viewer.run)
         )))
-        .block(Block::bordered().title(if viewer.follow {
-            "Following"
-        } else {
-            "Paused"
-        })),
+        .scroll((vertical[2], horizontal[2]))
+        .block(
+            Block::bordered()
+                .border_style(if focus == 2 {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default()
+                })
+                .title(if viewer.follow { "Following" } else { "Paused" }),
+        ),
         panes[0],
     );
     let columns = Layout::horizontal([Constraint::Percentage(32), Constraint::Percentage(68)])
@@ -1676,25 +1896,28 @@ fn draw_viewer(frame: &mut Frame, area: Rect, viewer: &mut Viewer) {
             } else {
                 ""
             };
-            let state = if text(r, "result").is_empty() {
-                text(r, "state")
-            } else {
-                text(r, "result")
-            };
-            format!(
-                "{indent}[{state}] {} {}%",
-                text(r, "name"),
-                scalar(&r["percentComplete"])
-            )
+            let progress = r["percentComplete"]
+                .as_i64()
+                .map(|n| format!(" {n}%"))
+                .unwrap_or_default();
+            format!("{indent}{} {}{progress}", run_icon(r), text(r, "name"))
+                .chars()
+                .skip(horizontal[0] as usize)
+                .collect::<String>()
         })
         .collect();
     let mut selected = ListState::default().with_selected(Some(viewer.selection()));
     draw_list(
         frame,
         columns[0],
-        "Stage / job / task",
+        if focus == 0 {
+            "▶ Stage / job / task"
+        } else {
+            "Stage / job / task"
+        },
         labels,
         &mut selected,
+        0,
     );
     let offset = viewer.offset(columns[1].height.saturating_sub(2) as usize);
     let log = if viewer.log.lines.is_empty() {
@@ -1714,9 +1937,15 @@ fn draw_viewer(frame: &mut Frame, area: Rect, viewer: &mut Viewer) {
         viewer.log.base
     );
     frame.render_widget(
-        Paragraph::new(log)
-            .scroll((offset, 0))
-            .block(Block::bordered().title(title)),
+        Paragraph::new(log).scroll((offset, horizontal[1])).block(
+            Block::bordered()
+                .border_style(if focus == 1 {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default()
+                })
+                .title(title),
+        ),
         columns[1],
     );
 }
@@ -1785,9 +2014,9 @@ mod tests {
         app.load_prs()?;
         let old_generation = app.generation;
         app.handle(key(KeyCode::Tab))?;
-        assert!(matches!(app.screen, Screen::Pipelines(_)));
+        assert!(matches!(app.screen, Screen::Recent(_)));
         app.receive((old_generation, Message::Prs(vec![])));
-        assert!(matches!(app.screen, Screen::Pipelines(_)));
+        assert!(matches!(app.screen, Screen::Recent(_)));
         app.handle(key(KeyCode::BackTab))?;
         assert!(matches!(app.screen, Screen::Prs(_)));
         app.writing = true;
@@ -1854,11 +2083,11 @@ mod tests {
             .insert(app.activity_key(7)?, vec![json!({"id":42})]);
         app.load_prs()?;
         app.selection.select(Some(1));
-        app.handle(key(KeyCode::Tab))?;
+        app.load_all_pipelines()?;
         assert!(matches!(app.screen, Screen::Pipelines(_)));
         assert_eq!(app.activity.len(), 1);
         assert!(app.task.is_none());
-        app.handle(key(KeyCode::Tab))?;
+        app.load_prs()?;
         assert_eq!(app.selection.selected(), Some(1));
         assert!(app.task.is_none());
         // Another project must never reuse these cached results.
@@ -1932,6 +2161,61 @@ mod tests {
         assert!(rendered.contains("Alpha"));
         app.handle(key(KeyCode::Down))?;
         assert_eq!(app.selection.selected(), Some(1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn loading_animates_and_refresh_keeps_rows_until_cancelled() -> Result<()> {
+        let (_root, mut app) = fixture()?;
+        auth::pat::save(&app.store, "saved", "fixture-pat")?;
+        app.screen = Screen::Prs(vec![json!({"pullRequestId":42,"title":"Existing PR"})]);
+        app.load_prs()?;
+        assert!(matches!(&app.screen, Screen::Prs(rows) if rows.len() == 1));
+        assert!(app.loading_since.is_some());
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 35))?;
+        terminal.draw(|frame| draw(frame, &mut app))?;
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Existing PR"));
+        assert!(rendered.contains("Loading pull requests"));
+        assert_ne!(
+            loading_text("Loading", Duration::ZERO, false),
+            loading_text("Loading", Duration::from_millis(100), false)
+        );
+        app.handle(key(KeyCode::Esc))?;
+        assert!(app.task.is_none());
+        assert!(app.loading_since.is_none());
+        assert!(matches!(&app.screen, Screen::Prs(rows) if rows.len() == 1));
+        assert!(!loading_text("Saving", Duration::ZERO, true).contains("cancel"));
+        Ok(())
+    }
+
+    #[test]
+    fn focused_log_pane_scrolls_without_changing_task_and_icons_cover_results() -> Result<()> {
+        let (_root, mut app) = fixture()?;
+        let mut viewer = Viewer::new(1);
+        viewer
+            .log
+            .append(0, (0..100).map(|n| format!("line {n}")).collect());
+        app.screen = Screen::Watch(Box::new(viewer));
+        app.handle(key(KeyCode::F(6)))?;
+        assert_eq!(app.pane_focus, 1);
+        app.handle(key(KeyCode::PageDown))?;
+        app.handle(key(KeyCode::Right))?;
+        let Screen::Watch(viewer) = &app.screen else {
+            anyhow::bail!("Expected watch");
+        };
+        assert_eq!(viewer.top, 20);
+        assert!(!viewer.follow);
+        assert_eq!(app.pane_x[1], 8);
+        assert_eq!(run_icon(&json!({"result":"succeeded"})), "✓");
+        assert_eq!(run_icon(&json!({"result":"failed"})), "✗");
+        assert_eq!(run_icon(&json!({"result":"skipped"})), "−");
         Ok(())
     }
 
