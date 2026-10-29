@@ -109,8 +109,7 @@ jobs:
           \`mise use -g github:$GH_REPO@$VERSION\`
 
           Start setup with \`devops login\`. Enter your organization and a personal access token at the masked prompt; no Entra app registration is required. Entra sign-in remains available with \`--entra\`.
-          The TUI now connects to the live task console while continuing to poll uploaded logs every two seconds. Uploaded logs replace the live tail after task completion. Connection failures are shown in the log pane and retried automatically. Background refreshes no longer flash the loading indicator, and duplicated footer shortcuts have been removed.
-          Live authentication and subscription were verified against Azure DevOps. Incoming console lines and the upload handoff passed local tests; delivery during an active tenant run remains unverified.
+          CLI lists now use bordered cli-table tables. PR details have description, comments, and status tabs, with a review status sidebar on wide terminals. TUI voting has been removed; CLI voting remains available.
 
           Linux uses a static musl binary, with no glibc requirement. ARM64 and macOS builds are not provided.
           Live tenant authentication acceptance is still required. See the README and docs/acceptance.md.

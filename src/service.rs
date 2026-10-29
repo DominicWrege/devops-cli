@@ -384,6 +384,10 @@ impl Service {
                 }
             }
         }
+        let mut pr = pr;
+        pr["detailThreads"] = threads;
+        pr["detailStatuses"] = statuses;
+        pr["detailPolicies"] = policies;
         Ok((pr, output::clean(&out)))
     }
     pub async fn pr_json(&self, command: &PrCommand) -> Result<Value> {
@@ -432,7 +436,7 @@ impl Service {
                 repo,
                 reviewer,
                 author,
-            } => Ok(pr_table(
+            } => pr_table(
                 &self
                     .pr_list(
                         *state,
@@ -441,8 +445,8 @@ impl Service {
                         author.as_deref(),
                     )
                     .await?,
-            )),
-            PrCommand::Status => Ok(pr_table(&self.attention_prs().await?)),
+            ),
+            PrCommand::Status => pr_table(&self.attention_prs().await?),
             PrCommand::View { id } => self.pr_detail(*id).await,
             PrCommand::Create(args) => {
                 let mut body = git::GitPullRequestCreateOptions::new(
@@ -725,10 +729,10 @@ impl Service {
     pub async fn pipeline_action(&self, command: &PipelineCommand) -> Result<String> {
         command.validate()?;
         match command {
-            PipelineCommand::List => Ok(output::table(
+            PipelineCommand::List => output::table(
                 &self.pipeline_list().await?,
                 &[("ID", "id"), ("NAME", "name"), ("FOLDER", "folder")],
-            )),
+            ),
             PipelineCommand::View { id } => {
                 let p = self.require_yaml(*id).await?;
                 Ok(format!(
@@ -739,7 +743,7 @@ impl Service {
                     text(&p["configuration"]["repository"], "id")
                 ))
             }
-            PipelineCommand::Runs { id } => Ok(run_table(&self.runs(*id).await?)),
+            PipelineCommand::Runs { id } => run_table(&self.runs(*id).await?),
             PipelineCommand::Inspect { run } => {
                 let build = self.build_run(*run).await?;
                 let timeline = self.timeline(*run).await?;
@@ -757,7 +761,7 @@ impl Service {
                             ("RESULT", "result"),
                             ("PERCENT", "percentComplete")
                         ]
-                    )
+                    )?
                 ))
             }
             PipelineCommand::Logs { run, log, start } => {
@@ -948,7 +952,7 @@ fn pairs(input: &[String], typed: bool) -> Result<serde_json::Map<String, Value>
     }
     Ok(map)
 }
-pub fn pr_table(items: &[Value]) -> String {
+pub fn pr_table(items: &[Value]) -> Result<String> {
     output::table(
         items,
         &[
@@ -968,7 +972,7 @@ fn pr_result(pr: &Value) -> String {
         text(pr, "remoteUrl")
     )
 }
-pub fn run_table(items: &[Value]) -> String {
+pub fn run_table(items: &[Value]) -> Result<String> {
     output::table(
         items,
         &[

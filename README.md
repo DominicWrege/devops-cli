@@ -113,7 +113,9 @@ devops tui
 | `F5` | Refresh lists and details |
 | `Esc` | Close a form or return home |
 
-In PR details, use `e` to edit, `c` to comment, `v` to vote, `m` to merge, `a` to abandon, or `r` to reactivate. Press `n` in the PR list or details to create a PR. Merge and abandon ask for confirmation.
+PR details show a fixed header, description/comments/status tabs, and a review status sidebar on wide terminals. Use `[` and `]` to switch detail tabs, `F6` to switch pane focus, and `PgUp`/`PgDn` to scroll. `Esc` returns to the PR list.
+
+In PR details, use `e` to edit, `c` to comment, `m` to merge, `a` to abandon, or `r` to reactivate. Press `n` in the PR list or details to create a PR. Merge and abandon ask for confirmation.
 
 Forms use Tab to move between fields, Ctrl+U to clear a field, and Enter to submit.
 
@@ -129,7 +131,7 @@ The pipeline TUI only observes runs. Use the CLI to trigger, retry, cancel, or r
 
 ## Use the CLI
 
-Commands other than `login` never prompt or open sign-in UI. Lists use aligned Markdown-style tables by default. Add `--json` to any CLI command
+Commands other than `login` never prompt or open sign-in UI. Lists use bordered tables rendered with `cli-table` by default. Add `--json` to any CLI command
 for machine-readable output, for example `devops pipeline list --json` or
 `devops --json pr list`. Lists return arrays; resource views return objects;
 `pipeline inspect` returns `run` and `timeline`; logs return an array of lines.

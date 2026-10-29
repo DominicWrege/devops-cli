@@ -1,3 +1,4 @@
+use cli_table::{Cell, ColorChoice, Table};
 use serde_json::Value;
 
 // Remote text must not be able to issue terminal escapes, OSC links, or carriage returns.
@@ -27,66 +28,39 @@ pub fn rows(value: &Value) -> Vec<Value> {
         .cloned()
         .unwrap_or_default()
 }
-pub fn table(items: &[Value], columns: &[(&str, &str)]) -> String {
-    let escape = |s: &str| cell(s).replace('\\', "\\\\").replace('|', "\\|");
-    let mut rows = vec![
-        columns
-            .iter()
-            .map(|(header, _)| escape(header))
-            .collect::<Vec<_>>(),
-    ];
-    rows.extend(items.iter().map(|item| {
-        columns
-            .iter()
-            .map(|(_, key)| escape(&scalar(&item[*key])))
-            .collect::<Vec<_>>()
-    }));
-    let widths = (0..columns.len())
-        .map(|i| {
-            rows.iter()
-                .map(|row| row[i].chars().count())
-                .max()
-                .unwrap_or(0)
-                .max(3)
-        })
-        .collect::<Vec<_>>();
-    let format_row = |row: &[String]| {
-        format!(
-            "| {} |",
-            row.iter()
-                .enumerate()
-                .map(|(i, value)| format!(
-                    "{}{}",
-                    value,
-                    " ".repeat(widths[i].saturating_sub(value.chars().count()))
-                ))
+pub fn table(items: &[Value], columns: &[(&str, &str)]) -> anyhow::Result<String> {
+    Ok(items
+        .iter()
+        .map(|item| {
+            columns
+                .iter()
+                .map(|(_, key)| cell(&scalar(&item[*key])).cell())
                 .collect::<Vec<_>>()
-                .join(" | ")
-        )
-    };
-    let mut lines = vec![
-        format_row(&rows[0]),
-        format_row(&widths.iter().map(|w| "-".repeat(*w)).collect::<Vec<_>>()),
-    ];
-    lines.extend(rows.iter().skip(1).map(|row| format_row(row)));
-    lines.join("\n")
+        })
+        .table()
+        .title(columns.iter().map(|(header, _)| cell(header).cell()))
+        .color_choice(ColorChoice::Never)
+        .display()?
+        .to_string()
+        .trim_end_matches('\n')
+        .to_owned())
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn markdown_table_aligns_and_escapes_cells() {
+    fn table_renders_borders_and_sanitizes_cells() -> anyhow::Result<()> {
         let result = table(
             &[serde_json::json!({"id":7,"name":"a|b\nc"})],
             &[("ID", "id"), ("NAME", "name")],
-        );
-        assert!(result.starts_with("| ID  | NAME"));
-        assert!(result.contains("| --- |"));
-        assert!(result.contains("a\\|b c"));
-        assert_eq!(result.lines().count(), 3);
-        let empty = table(&[], &[("ID", "id")]);
-        assert_eq!(empty, "| ID  |\n| --- |");
+        )?;
+        assert!(result.starts_with("+----+-------+"));
+        assert!(result.contains("| ID | NAME  |"));
+        assert!(result.contains("a|b c"));
+        assert_eq!(result.lines().count(), 5);
+        let empty = table(&[], &[("ID", "id")])?;
+        assert!(empty.contains("| ID |"));
+        Ok(())
     }
 
     #[test]

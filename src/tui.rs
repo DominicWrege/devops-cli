@@ -63,7 +63,7 @@ enum Screen {
     Organizations(Vec<Value>),
     Projects(Vec<Value>),
     Prs(Vec<Value>),
-    Pr { value: Value, detail: String },
+    Pr { value: Value },
     Pipelines(Vec<Value>),
     Recent(Vec<Value>),
     Runs { pipeline: i32, values: Vec<Value> },
@@ -76,7 +76,6 @@ enum Message {
     Prs(Vec<Value>),
     Pr {
         value: Value,
-        detail: String,
     },
     Pipelines(Vec<Value>),
     Recent(Vec<Value>),
@@ -104,7 +103,6 @@ enum FormKind {
     Create,
     Edit(i32),
     Comment(i32),
-    Review(i32),
     Merge(i32),
 }
 struct Field {
@@ -193,10 +191,6 @@ impl Form {
                 id,
                 body: self.value(0)?.into(),
             },
-            FormKind::Review(id) => PrCommand::Review {
-                id,
-                vote: Vote::from_str(self.value(0)?, true).map_err(|e| anyhow::anyhow!(e))?,
-            },
             FormKind::Merge(id) => PrCommand::Merge {
                 id,
                 strategy: MergeStrategy::from_str(self.value(0)?, true)
@@ -228,6 +222,7 @@ struct App {
     screen: Screen,
     selection: ListState,
     detail_scroll: u16,
+    pr_tab: usize,
     pane_focus: usize,
     pane_x: [u16; 3],
     pane_y: [u16; 3],
@@ -277,6 +272,7 @@ impl App {
             screen: Screen::Home,
             selection: ListState::default().with_selected(Some(0)),
             detail_scroll: 0,
+            pr_tab: 0,
             pane_focus: 0,
             pane_x: [0; 3],
             pane_y: [0; 3],
@@ -414,6 +410,7 @@ impl App {
         self.screen = screen;
         self.selection = ListState::default().with_selected(Some(selected));
         self.detail_scroll = 0;
+        self.pr_tab = 0;
         self.pane_focus = 0;
         self.pane_x = [0; 3];
         self.pane_y = [0; 3];
@@ -599,8 +596,8 @@ impl App {
     fn load_pr(&mut self, id: i32) -> Result<()> {
         let api = self.api()?;
         self.launch(async move {
-            let (value, detail) = api.pr_details(id).await?;
-            Ok(Message::Pr { value, detail })
+            let (value, _) = api.pr_details(id).await?;
+            Ok(Message::Pr { value })
         });
         Ok(())
     }
@@ -733,7 +730,7 @@ impl App {
                 }
                 self.set_screen(Screen::Prs(items));
             }
-            Message::Pr { value, detail } => self.set_screen(Screen::Pr { value, detail }),
+            Message::Pr { value } => self.set_screen(Screen::Pr { value }),
             Message::Pipelines(mut items) => {
                 sort_pipelines(&mut items);
                 if let Ok(target) = self
@@ -939,15 +936,6 @@ impl App {
                     vec![("Comment", String::new())],
                 ))
             }
-            'v' => {
-                self.form = Some(Form::new(
-                    FormKind::Review(id),
-                    vec![(
-                        "approve / approve-with-suggestions / reset / wait / reject",
-                        "approve".into(),
-                    )],
-                ))
-            }
             'm' => {
                 self.form = Some(Form::new(
                     FormKind::Merge(id),
@@ -1061,11 +1049,38 @@ impl App {
         if key.code == KeyCode::F(6) {
             let panes = match self.screen {
                 Screen::Watch(_) => 3,
-                Screen::Prs(_) | Screen::Pipelines(_) => 2,
+                Screen::Prs(_) | Screen::Pr { .. } | Screen::Pipelines(_) => 2,
                 _ => 1,
             };
             self.pane_focus = (self.pane_focus + 1) % panes;
             return Ok(false);
+        }
+        if matches!(self.screen, Screen::Pr { .. }) {
+            match key.code {
+                KeyCode::Char('[' | ']') => {
+                    self.pr_tab =
+                        (self.pr_tab + if key.code == KeyCode::Char(']') { 1 } else { 2 }) % 3;
+                    self.pane_y = [0; 3];
+                    return Ok(false);
+                }
+                KeyCode::Up | KeyCode::Char('k') | KeyCode::PageUp => {
+                    let step = if key.code == KeyCode::PageUp { 20 } else { 1 };
+                    self.pane_y[self.pane_focus] =
+                        self.pane_y[self.pane_focus].saturating_sub(step);
+                    return Ok(false);
+                }
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::PageDown => {
+                    let step = if key.code == KeyCode::PageDown { 20 } else { 1 };
+                    self.pane_y[self.pane_focus] =
+                        self.pane_y[self.pane_focus].saturating_add(step);
+                    return Ok(false);
+                }
+                KeyCode::Home => {
+                    self.pane_y[self.pane_focus] = 0;
+                    return Ok(false);
+                }
+                _ => {}
+            }
         }
         if matches!(key.code, KeyCode::Left | KeyCode::Right) {
             let offset = &mut self.pane_x[self.pane_focus];
@@ -1359,6 +1374,147 @@ fn loading_text(label: &str, elapsed: Duration, writing: bool) -> String {
     )
 }
 
+fn pr_rows(value: &Value) -> &[Value] {
+    value.as_array().map(Vec::as_slice).unwrap_or(&[])
+}
+
+fn render_pr(
+    frame: &mut Frame,
+    area: Rect,
+    pr: &Value,
+    tab: usize,
+    focus: usize,
+    scroll: [u16; 3],
+) {
+    let regions = Layout::vertical([Constraint::Length(5), Constraint::Min(0)]).split(area);
+    let header = format!(
+        "#{}  {}\n{}{} | {}\n{} -> {}",
+        scalar(&pr["pullRequestId"]),
+        text(pr, "title"),
+        text(pr, "status"),
+        if pr["isDraft"] == true {
+            " (draft)"
+        } else {
+            ""
+        },
+        text(&pr["createdBy"], "displayName"),
+        text(pr, "sourceRefName").trim_start_matches("refs/heads/"),
+        text(pr, "targetRefName").trim_start_matches("refs/heads/")
+    );
+    frame.render_widget(
+        Paragraph::new(output::clean(&header)).block(Block::bordered().title("Pull request")),
+        regions[0],
+    );
+    let mut status = Vec::<Line>::new();
+    for (heading, key) in [
+        ("Reviewers", "reviewers"),
+        ("Checks", "detailStatuses"),
+        ("Policies", "detailPolicies"),
+    ] {
+        status.push(Line::styled(heading, Style::default().bold()));
+        let rows = pr_rows(&pr[key]);
+        if rows.is_empty() {
+            status.push(Line::raw("None reported"));
+        }
+        for row in rows {
+            let (name, state) = match key {
+                "reviewers" => (
+                    text(row, "displayName"),
+                    match row["vote"].as_i64().unwrap_or(0) {
+                        10 => "Approved",
+                        5 => "Approved with suggestions",
+                        -5 => "Waiting",
+                        -10 => "Changes requested",
+                        _ => "Pending",
+                    },
+                ),
+                "detailStatuses" => (text(&row["context"], "name"), text(row, "state")),
+                _ => (
+                    text(&row["configuration"]["type"], "displayName"),
+                    text(row, "status"),
+                ),
+            };
+            let color = match state.to_ascii_lowercase().as_str() {
+                "approved" | "approved with suggestions" | "succeeded" => Color::Green,
+                "failed" | "error" | "rejected" | "changes requested" => Color::Red,
+                _ => Color::Yellow,
+            };
+            status.push(Line::raw(output::clean(name)));
+            status.push(Line::styled(
+                format!("  {}", output::clean(state)),
+                Style::default().fg(color),
+            ));
+        }
+        status.push(Line::raw(""));
+    }
+    let mut comments = String::new();
+    for thread in pr_rows(&pr["detailThreads"]) {
+        for comment in pr_rows(&thread["comments"]) {
+            if comment["isDeleted"] == true {
+                continue;
+            }
+            comments.push_str(&format!(
+                "{}\n{}\n\n",
+                text(&comment["author"], "displayName"),
+                text(comment, "content")
+            ));
+        }
+    }
+    if comments.is_empty() {
+        comments = "No comments yet. Press c to add a comment.".into();
+    }
+    let description = text(pr, "description");
+    let body = match tab {
+        1 => Text::raw(output::clean(&comments)),
+        2 => Text::from(status.clone()),
+        _ => Text::raw(output::clean(if description.is_empty() {
+            "No description."
+        } else {
+            description
+        })),
+    };
+    let wide = area.width >= 90;
+    let panes = Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .split(regions[1]);
+    let title = match tab {
+        1 => "Description | [Comments] | Status",
+        2 => "Description | Comments | [Status]",
+        _ => "[Description] | Comments | Status",
+    };
+    frame.render_widget(
+        Paragraph::new(body)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll[if wide { 0 } else { focus }], 0))
+            .block(
+                Block::bordered()
+                    .title(title)
+                    .border_style(Style::default().fg(if focus == 0 {
+                        Color::Cyan
+                    } else {
+                        Color::DarkGray
+                    })),
+            ),
+        if wide { panes[0] } else { regions[1] },
+    );
+    if wide {
+        frame.render_widget(
+            Paragraph::new(status)
+                .wrap(Wrap { trim: false })
+                .scroll((scroll[1], 0))
+                .block(
+                    Block::bordered()
+                        .title("Review status")
+                        .border_style(Style::default().fg(if focus == 1 {
+                            Color::Cyan
+                        } else {
+                            Color::DarkGray
+                        })),
+                ),
+            panes[1],
+        );
+    }
+}
+
 fn draw(frame: &mut Frame, app: &mut App) {
     let now = time::OffsetDateTime::now_utc();
     let loading = app
@@ -1510,15 +1666,16 @@ fn draw(frame: &mut Frame, app: &mut App) {
             );
             "Enter: view   n: create   i: toggle assigned reviews   F5: refresh   Esc: home"
         }
-        Screen::Pr { detail, .. } => {
-            frame.render_widget(
-                Paragraph::new(detail.as_str())
-                    .wrap(Wrap { trim: false })
-                    .scroll((app.detail_scroll, app.pane_x[0]))
-                    .block(Block::bordered().title("Pull request")),
+        Screen::Pr { value, .. } => {
+            render_pr(
+                frame,
                 layout[1],
+                value,
+                app.pr_tab,
+                app.pane_focus,
+                app.pane_y,
             );
-            "n: create   e: edit   c: comment   v: vote   m: merge   a: abandon   r: reactivate\nPgUp/PgDn: scroll   F5: refresh   Esc: home"
+            "e: edit   c: comment   m: merge   a: abandon   r: reactivate   n: create\n[/]: tab   F6: focus   PgUp/PgDn: scroll   F5: refresh   Esc: PR list"
         }
         Screen::Pipelines(items) => {
             let panes = if layout[1].width >= 90 {
@@ -2567,11 +2724,47 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn pr_detail_tabs_render_structured_content_at_both_widths() -> Result<()> {
+        let (_root, mut app) = fixture()?;
+        app.screen = Screen::Pr {
+            value: json!({
+                "pullRequestId": 7, "title": "Example PR", "description": "Description text",
+                "reviewers": [{"displayName":"Sam", "vote":10}],
+                "detailThreads": [{"comments":[{"author":{"displayName":"Alex"}, "content":"Visible comment"}, {"isDeleted":true,"content":"Deleted comment"}]}]
+            }),
+        };
+        app.handle(key(KeyCode::Char(']')))?;
+        assert_eq!(app.pr_tab, 1);
+        for width in [70, 120] {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 30))?;
+            let Screen::Pr { value } = &app.screen else {
+                anyhow::bail!("Expected PR detail screen")
+            };
+            terminal.draw(|frame| render_pr(frame, frame.area(), value, app.pr_tab, 0, [0; 3]))?;
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(rendered.contains("Visible comment"));
+            assert!(!rendered.contains("Deleted comment"));
+            if width == 120 {
+                assert!(rendered.contains("Approved"));
+            }
+        }
+        app.handle(key(KeyCode::Char('v')))?;
+        assert!(app.form.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn abandonment_requires_a_separate_confirmation() -> Result<()> {
         let (_root, mut app) = fixture()?;
         app.screen = Screen::Pr {
             value: json!({"pullRequestId":7}),
-            detail: String::new(),
         };
         app.open_pr_form('a')?;
         assert!(matches!(

@@ -2,6 +2,13 @@
 
 No live Azure DevOps writes have been run by the implementation session. Use an explicitly approved disposable repository, PR, and pipeline for these checks.
 
+## 0.3.7 verification
+
+Local Windows checks cover 90 Rust tests and five packaging tests, formatting,
+and Clippy. Table rendering and PR detail tabs have automated coverage.
+The credential-dependent live console test remains ignored; live tenant and
+local WSL behavior were not retested for this patch.
+
 ## 0.3.6 verification
 
 Windows checks cover 89 Rust tests, formatting, Clippy, five packaging tests, and
