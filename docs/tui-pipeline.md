@@ -18,6 +18,11 @@ Status: initial implementation and model/render tests complete; live tenant usab
 - Show run identity, branch, overall status, and elapsed time in a header.
 - Distinguish pending, running, succeeded, failed, skipped, and canceled tasks without relying on color alone.
 - Keep the display usable when logs are temporarily unavailable or a connection fails.
+- On wide terminals, recent runs and the task tree share the left column; logs fill
+  the right column. Narrow terminals place logs below the two lists. `w` / `F6`
+  cycles pane focus, arrows navigate, and Shift+Left/Right pans long lines.
+- The run viewer retains the originating list. Select another run in its runs pane
+  with Enter, or press Esc to return to that list. Tab still switches sections.
 
 - Use Up/Down to select a stage, job, or task. Selecting a job then pressing `f` follows tasks within that job. PageUp/PageDown scrolls logs and pauses following.
 - Poll status, timeline, and incremental log pages every two seconds. No push-streaming dependency.

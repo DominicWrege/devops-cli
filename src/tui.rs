@@ -30,6 +30,11 @@ use std::{
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 
+mod chrome;
+#[cfg(test)]
+mod interaction_tests;
+use chrome::{command_rows, draw_commands, draw_header, pane_block, popup, selection_style};
+
 type Terminal = ratatui::Terminal<CrosstermBackend<io::Stdout>>;
 
 struct TerminalGuard;
@@ -63,6 +68,7 @@ enum Screen {
     Organizations(Vec<Value>),
     Projects(Vec<Value>),
     Prs(Vec<Value>),
+    Repos(Vec<Value>),
     Pr { value: Value },
     Pipelines(Vec<Value>),
     Recent(Vec<Value>),
@@ -74,6 +80,7 @@ enum Message {
     Organizations(Vec<Value>),
     Projects(Vec<Value>),
     Prs(Vec<Value>),
+    Repos(Vec<Value>),
     Pr {
         value: Value,
     },
@@ -117,6 +124,9 @@ struct Field {
     secret: bool,
 }
 impl Field {
+    fn multiline(&self) -> bool {
+        matches!(self.name, "Description" | "Comment")
+    }
     fn display(&self) -> String {
         if self.secret {
             "*".repeat(self.value.chars().count())
@@ -237,6 +247,11 @@ struct App {
     form: Option<Form>,
     confirm: Option<PrCommand>,
     pr_actions: bool,
+    help_scroll: Option<u16>,
+    expanded_commands: bool,
+    viewport: Rect,
+    run_list: Option<RunList>,
+    picker_return: Option<SavedView>,
     settings_menu: Option<usize>,
     status: String,
     task: Option<JoinHandle<()>>,
@@ -247,15 +262,34 @@ struct App {
     activity_pipeline: Option<i32>,
     pr_cache: Option<(Target, bool, Vec<Value>)>,
     pipeline_cache: Option<(Target, Vec<Value>)>,
+    repo_cache: Option<(Target, Vec<Value>)>,
     activity_cache: std::collections::HashMap<String, Vec<Value>>,
     pr_selection: usize,
     pipeline_selection: usize,
+    repo_selection: usize,
     activity_due: Option<Instant>,
     recent_due: Instant,
     tx: mpsc::UnboundedSender<(u64, Message)>,
     generation: u64,
     poll_at: Instant,
     live: Option<LiveSession>,
+}
+
+struct RunList {
+    pipeline: Option<i32>,
+    items: Vec<Value>,
+    selection: ListState,
+}
+
+struct SavedView {
+    screen: Screen,
+    run_list: Option<RunList>,
+    selection: ListState,
+    focus: usize,
+    detail_scroll: u16,
+    tab: usize,
+    x: [u16; 3],
+    y: [u16; 3],
 }
 impl Drop for App {
     fn drop(&mut self) {
@@ -288,6 +322,11 @@ impl App {
             form: None,
             confirm: None,
             pr_actions: false,
+            help_scroll: None,
+            expanded_commands: false,
+            viewport: Rect::new(0, 0, 120, 30),
+            run_list: None,
+            picker_return: None,
             settings_menu: None,
             status: String::new(),
             task: None,
@@ -298,9 +337,11 @@ impl App {
             activity_pipeline: None,
             pr_cache: None,
             pipeline_cache: None,
+            repo_cache: None,
             activity_cache: std::collections::HashMap::new(),
             pr_selection: 0,
             pipeline_selection: 0,
+            repo_selection: 0,
             activity_due: None,
             recent_due: Instant::now(),
             tx,
@@ -390,6 +431,7 @@ impl App {
         self.loading_since = Some(Instant::now());
         self.loading_label = match self.screen {
             Screen::Prs(_) => "Loading pull requests",
+            Screen::Repos(_) => "Loading repositories",
             Screen::Pipelines(_) => "Loading pipelines",
             Screen::Recent(_) => "Refreshing recent runs",
             Screen::Watch(_) => "Updating timeline and logs",
@@ -405,8 +447,12 @@ impl App {
     }
     fn set_screen(&mut self, screen: Screen) {
         self.live = None;
+        if !matches!(screen, Screen::Watch(_)) {
+            self.run_list = None;
+        }
         match self.screen {
             Screen::Prs(_) => self.pr_selection = self.selection.selected().unwrap_or(0),
+            Screen::Repos(_) => self.repo_selection = self.selection.selected().unwrap_or(0),
             Screen::Pipelines(_) => {
                 self.pipeline_selection = self.selection.selected().unwrap_or(0)
             }
@@ -414,6 +460,7 @@ impl App {
         }
         let selected = match &screen {
             Screen::Prs(items) => self.pr_selection.min(items.len().saturating_sub(1)),
+            Screen::Repos(items) => self.repo_selection.min(items.len().saturating_sub(1)),
             Screen::Pipelines(items) => self.pipeline_selection.min(items.len().saturating_sub(1)),
             _ => 0,
         };
@@ -424,6 +471,30 @@ impl App {
         self.pane_focus = 0;
         self.pane_x = [0; 3];
         self.pane_y = [0; 3];
+    }
+    fn save_picker_view(&mut self) {
+        if self.picker_return.is_none() {
+            self.picker_return = Some(SavedView {
+                screen: std::mem::replace(&mut self.screen, Screen::Home),
+                run_list: self.run_list.take(),
+                selection: self.selection.clone(),
+                focus: self.pane_focus,
+                detail_scroll: self.detail_scroll,
+                tab: self.pr_tab,
+                x: self.pane_x,
+                y: self.pane_y,
+            });
+        }
+    }
+    fn swap_view(&mut self, view: &mut SavedView) {
+        std::mem::swap(&mut self.screen, &mut view.screen);
+        std::mem::swap(&mut self.run_list, &mut view.run_list);
+        std::mem::swap(&mut self.selection, &mut view.selection);
+        std::mem::swap(&mut self.pane_focus, &mut view.focus);
+        std::mem::swap(&mut self.detail_scroll, &mut view.detail_scroll);
+        std::mem::swap(&mut self.pr_tab, &mut view.tab);
+        std::mem::swap(&mut self.pane_x, &mut view.x);
+        std::mem::swap(&mut self.pane_y, &mut view.y);
     }
     fn identity_form(&mut self) {
         if auth::uses_pat(&self.settings) {
@@ -515,6 +586,26 @@ impl App {
                 api.pr_list(PrState::Active, None, None, None).await?
             }))
         });
+        Ok(())
+    }
+    fn load_repos(&mut self) -> Result<()> {
+        let target = self
+            .settings
+            .target(self.org.as_deref(), self.project.as_deref())?;
+        if let Some((cached, items)) = &self.repo_cache
+            && *cached == target
+        {
+            let items = items.clone();
+            self.cancel_task();
+            self.set_screen(Screen::Repos(items));
+            self.status = "F5 refreshes this view".into();
+            return Ok(());
+        }
+        let api = self.api()?;
+        if !matches!(self.screen, Screen::Repos(_)) {
+            self.set_screen(Screen::Repos(Vec::new()));
+        }
+        self.launch(async move { Ok(Message::Repos(api.repo_list().await?)) });
         Ok(())
     }
     fn load_recent(&mut self) -> Result<()> {
@@ -707,6 +798,7 @@ impl App {
         match message {
             Message::Organizations(items) => self.set_screen(Screen::Organizations(items)),
             Message::Projects(items) => {
+                self.save_picker_view();
                 let selected = if self.setup_org == self.settings.organization {
                     items
                         .iter()
@@ -731,6 +823,29 @@ impl App {
                     self.status.clear();
                 }
             }
+            Message::Repos(mut items) => {
+                let selected_id = if let Screen::Repos(previous) = &self.screen {
+                    previous
+                        .get(self.selection.selected().unwrap_or(0))
+                        .and_then(|v| v["id"].as_str())
+                        .map(str::to_owned)
+                } else {
+                    None
+                };
+                items.sort_by_key(|v| text(v, "name").to_lowercase());
+                if let Some(id) = selected_id
+                    && let Some(index) = items.iter().position(|v| v["id"].as_str() == Some(&id))
+                {
+                    self.selection.select(Some(index));
+                }
+                if let Ok(target) = self
+                    .settings
+                    .target(self.org.as_deref(), self.project.as_deref())
+                {
+                    self.repo_cache = Some((target, items.clone()));
+                }
+                self.set_screen(Screen::Repos(items));
+            }
             Message::Prs(items) => {
                 if let Ok(target) = self
                     .settings
@@ -740,7 +855,16 @@ impl App {
                 }
                 self.set_screen(Screen::Prs(items));
             }
-            Message::Pr { value } => self.set_screen(Screen::Pr { value }),
+            Message::Pr { value } => {
+                if let Screen::Pr { value: current } = &mut self.screen
+                    && current["pullRequestId"] == value["pullRequestId"]
+                {
+                    *current = value;
+                } else {
+                    self.set_screen(Screen::Pr { value });
+                    self.pane_focus = usize::from(self.viewport.width >= 90);
+                }
+            }
             Message::Pipelines(mut items) => {
                 sort_pipelines(&mut items);
                 if let Ok(target) = self
@@ -798,6 +922,7 @@ impl App {
                 self.status = format!("Saved pipeline {name}");
             }
             Message::Written(message) => {
+                self.form = None;
                 self.pr_cache = None;
                 self.pipeline_cache = None;
                 self.status = format!("{message}\nPress F5 to refresh.");
@@ -892,8 +1017,8 @@ impl App {
         }
         let command = form.command()?;
         command.validate()?;
-        self.form = None;
         if matches!(command, PrCommand::Merge { .. } | PrCommand::Abandon { .. }) {
+            self.form = None;
             self.confirm = Some(command);
         } else {
             self.execute_pr(command)?;
@@ -903,6 +1028,9 @@ impl App {
     fn enter(&mut self) -> Result<()> {
         let index = self.selection.selected().unwrap_or(0);
         match &self.screen {
+            Screen::Repos(items) if !items.is_empty() => {
+                self.pane_focus = 1;
+            }
             Screen::Organizations(items) => {
                 let org = items.get(index).context("No organizations available")?;
                 let organization = crate::config::organization(text(org, "accountName"))?;
@@ -927,6 +1055,7 @@ impl App {
                 self.project = None;
                 self.settings = settings;
                 self.setup_org = None;
+                self.picker_return = None;
                 self.open_workspace();
             }
             Screen::Prs(items) => {
@@ -942,6 +1071,15 @@ impl App {
             Screen::Recent(values) | Screen::Runs { values, .. } => {
                 if let Some(item) = values.get(index) {
                     let run = response_id(item, "id")?;
+                    self.run_list = Some(RunList {
+                        pipeline: if let Screen::Runs { pipeline, .. } = self.screen {
+                            Some(pipeline)
+                        } else {
+                            None
+                        },
+                        items: values.clone(),
+                        selection: self.selection.clone(),
+                    });
                     self.set_screen(Screen::Watch(Box::new(Viewer::new(run))));
                     self.poll_at = Instant::now();
                 }
@@ -1018,9 +1156,11 @@ impl App {
         self.pr_cache = None;
         self.pipeline_cache = None;
         self.activity_cache.clear();
+        self.repo_cache = None;
         match &self.screen {
             Screen::Recent(_) => self.load_recent()?,
             Screen::Prs(_) => self.load_prs()?,
+            Screen::Repos(_) => self.load_repos()?,
             Screen::Pr { value, .. } => self.load_pr(response_id(value, "pullRequestId")?)?,
             Screen::Pipelines(_) => self.load_all_pipelines()?,
             Screen::Runs { pipeline, .. } => {
@@ -1050,6 +1190,17 @@ impl App {
         }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Ok(true);
+        }
+        if let Some(scroll) = &mut self.help_scroll {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('h') => self.help_scroll = None,
+                KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
+                KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+                KeyCode::PageDown => *scroll = scroll.saturating_add(10),
+                KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+                _ => (),
+            }
+            return Ok(false);
         }
         if let Some(command) = self.confirm.take() {
             match key.code {
@@ -1086,7 +1237,20 @@ impl App {
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     form.selected_field()?.value.clear()
                 }
-                KeyCode::Char(c) if !c.is_control() => form.selected_field()?.value.push(c),
+                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.submit()?
+                }
+                KeyCode::Char(c)
+                    if !c.is_control()
+                        && !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    form.selected_field()?.value.push(c)
+                }
+                KeyCode::Enter if form.selected_field()?.multiline() => {
+                    form.selected_field()?.value.push('\n')
+                }
                 KeyCode::Enter => self.submit()?,
                 _ => (),
             }
@@ -1115,7 +1279,10 @@ impl App {
             }
             return Ok(false);
         }
-        if key.code == KeyCode::Char('s') && !self.writing && matches!(self.screen, Screen::Home) {
+        if key.code == KeyCode::Char('s')
+            && !self.writing
+            && !matches!(self.screen, Screen::Projects(_) | Screen::Organizations(_))
+        {
             self.cancel_task();
             self.settings_menu = Some(0);
             return Ok(false);
@@ -1123,22 +1290,40 @@ impl App {
         if key.code == KeyCode::Char('q') {
             return Ok(true);
         }
-        if key.code == KeyCode::F(6) {
-            let panes = match self.screen {
-                Screen::Watch(_) => 3,
-                Screen::Prs(_) | Screen::Pr { .. } | Screen::Pipelines(_) => 2,
-                _ => 1,
-            };
+        if key.code == KeyCode::Char('h') {
+            self.help_scroll = Some(0);
+            return Ok(false);
+        }
+        if key.code == KeyCode::Char('.') {
+            self.expanded_commands = !self.expanded_commands;
+            return Ok(false);
+        }
+        if matches!(self.screen, Screen::Projects(_) | Screen::Organizations(_))
+            && !matches!(
+                key.code,
+                KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Char('j' | 'k')
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+                    | KeyCode::Enter
+                    | KeyCode::Esc
+            )
+        {
+            return Ok(false);
+        }
+        if matches!(key.code, KeyCode::F(6) | KeyCode::Char('w')) {
+            let panes = pane_count(&self.screen, self.viewport);
             self.pane_focus = (self.pane_focus + 1) % panes;
             return Ok(false);
         }
         if matches!(self.screen, Screen::Pr { .. }) {
             match key.code {
-                KeyCode::Left | KeyCode::Right | KeyCode::Char('[' | ']') => {
-                    let next = matches!(key.code, KeyCode::Right | KeyCode::Char(']'));
+                KeyCode::Char('[' | ']') => {
+                    let next = key.code == KeyCode::Char(']');
                     self.pr_tab = (self.pr_tab + if next { 1 } else { 2 }) % 3;
-                    self.pane_focus = 0;
-                    self.pane_y[0] = 0;
+                    self.pane_focus = usize::from(self.viewport.width >= 90);
+                    self.pane_y[self.pane_focus] = 0;
                     return Ok(false);
                 }
                 KeyCode::Up | KeyCode::Char('k') | KeyCode::PageUp => {
@@ -1161,6 +1346,14 @@ impl App {
             }
         }
         if matches!(key.code, KeyCode::Left | KeyCode::Right) {
+            if !key.modifiers.contains(KeyModifiers::SHIFT) {
+                self.pane_focus = if key.code == KeyCode::Left {
+                    0
+                } else {
+                    1.min(pane_count(&self.screen, self.viewport) - 1)
+                };
+                return Ok(false);
+            }
             let offset = &mut self.pane_x[self.pane_focus];
             *offset = if key.code == KeyCode::Left {
                 offset.saturating_sub(8)
@@ -1172,33 +1365,94 @@ impl App {
         // Switch views before the loading guard; never interrupt a submitted write.
         if matches!(
             key.code,
-            KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('1' | '2')
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('1' | '2' | '3')
         ) && !self.writing
             && matches!(
                 self.screen,
                 Screen::Prs(_)
+                    | Screen::Repos(_)
                     | Screen::Pr { .. }
+                    | Screen::Home
                     | Screen::Pipelines(_)
                     | Screen::Recent(_)
                     | Screen::Runs { .. }
                     | Screen::Watch(_)
             )
         {
-            let pipelines = match key.code {
-                KeyCode::Char('2') => false,
-                KeyCode::Char('1') => true,
-                _ => matches!(self.screen, Screen::Prs(_) | Screen::Pr { .. }),
+            let section = match key.code {
+                KeyCode::Char('1') => 0,
+                KeyCode::Char('2') => 1,
+                KeyCode::Char('3') => 2,
+                KeyCode::BackTab => (section_index(&self.screen).unwrap_or(0) + 2) % 3,
+                _ => (section_index(&self.screen).unwrap_or(2) + 1) % 3,
             };
-            if pipelines {
-                self.load_pipelines()?;
-            } else {
-                self.load_prs()?;
+            match section {
+                0 => self.load_pipelines()?,
+                1 => self.load_prs()?,
+                _ => self.load_repos()?,
             }
             return Ok(false);
         }
         if key.code == KeyCode::Esc && self.task.is_some() && !self.writing {
             self.cancel_task();
             self.status = "Loading canceled. F5 to retry.".into();
+            return Ok(false);
+        }
+        if key.code == KeyCode::Esc
+            && matches!(self.screen, Screen::Projects(_) | Screen::Organizations(_))
+        {
+            self.setup_org = None;
+            if let Some(mut view) = self.picker_return.take() {
+                self.swap_view(&mut view);
+                self.poll_at = Instant::now();
+            } else {
+                self.set_screen(Screen::Home);
+            }
+            return Ok(false);
+        }
+        if matches!(self.screen, Screen::Watch(_)) && key.code == KeyCode::Esc {
+            self.cancel_task();
+            if let Some(list) = self.run_list.take() {
+                let screen = match list.pipeline {
+                    Some(pipeline) => Screen::Runs {
+                        pipeline,
+                        values: list.items,
+                    },
+                    None => Screen::Recent(list.items),
+                };
+                self.set_screen(screen);
+                self.selection = list.selection;
+            } else {
+                self.load_recent()?;
+            }
+            return Ok(false);
+        }
+        if matches!(self.screen, Screen::Watch(_))
+            && self.pane_focus == 2
+            && let Some(list) = &mut self.run_list
+        {
+            let selected = list.selection.selected().unwrap_or(0);
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') | KeyCode::PageUp => list.selection.select(Some(
+                    selected.saturating_sub(if key.code == KeyCode::PageUp { 20 } else { 1 }),
+                )),
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::PageDown => {
+                    list.selection.select(Some(
+                        selected
+                            .saturating_add(if key.code == KeyCode::PageDown { 20 } else { 1 })
+                            .min(list.items.len().saturating_sub(1)),
+                    ))
+                }
+                KeyCode::Enter => {
+                    if let Some(item) = list.items.get(selected) {
+                        let run = response_id(item, "id")?;
+                        self.cancel_task();
+                        self.set_screen(Screen::Watch(Box::new(Viewer::new(run))));
+                        self.poll_at = Instant::now();
+                    }
+                }
+                _ => (),
+            }
             return Ok(false);
         }
         // Keep navigation responsive while polling, but don't overlap writes or setup.
@@ -1225,11 +1479,6 @@ impl App {
                     self.pane_y[2] = self.pane_y[2].saturating_add(1)
                 }
                 KeyCode::Char('f') => viewer.resume(),
-                KeyCode::Esc => {
-                    self.cancel_task();
-                    // The generation check rejects replies already queued before abort.
-                    self.set_screen(Screen::Home);
-                }
                 _ => (),
             }
             return Ok(false);
@@ -1237,6 +1486,7 @@ impl App {
         if self.pane_focus == 0 && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
             let count = match &self.screen {
                 Screen::Prs(items)
+                | Screen::Repos(items)
                 | Screen::Pipelines(items)
                 | Screen::Recent(items)
                 | Screen::Projects(items)
@@ -1258,7 +1508,12 @@ impl App {
                 return Ok(false);
             }
         }
-        if self.pane_focus == 1 && matches!(self.screen, Screen::Prs(_) | Screen::Pipelines(_)) {
+        if self.pane_focus == 1
+            && matches!(
+                self.screen,
+                Screen::Prs(_) | Screen::Pipelines(_) | Screen::Repos(_)
+            )
+        {
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
                     self.detail_scroll = self.detail_scroll.saturating_sub(1)
@@ -1352,6 +1607,7 @@ impl App {
                     Screen::Organizations(v)
                     | Screen::Projects(v)
                     | Screen::Prs(v)
+                    | Screen::Repos(v)
                     | Screen::Pipelines(v)
                     | Screen::Recent(v) => v.len(),
                     Screen::Runs { values, .. } => values.len(),
@@ -1492,8 +1748,16 @@ fn render_pr(
     tab: usize,
     focus: usize,
     scroll: [u16; 3],
+    horizontal: [u16; 3],
 ) {
-    let regions = Layout::vertical([Constraint::Length(5), Constraint::Min(0)]).split(area);
+    let wide = area.width >= 90;
+    let columns =
+        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(area);
+    let regions = Layout::vertical([Constraint::Length(5), Constraint::Min(0)]).split(if wide {
+        columns[0]
+    } else {
+        area
+    });
     let header = format!(
         "#{}  {}\n{}{} | {}\n{} -> {}",
         scalar(&pr["pullRequestId"]),
@@ -1509,7 +1773,7 @@ fn render_pr(
         text(pr, "targetRefName").trim_start_matches("refs/heads/")
     );
     frame.render_widget(
-        Paragraph::new(output::clean(&header)).block(Block::bordered().title("Pull request")),
+        Paragraph::new(output::clean(&header)).block(pane_block("Pull request", false)),
         regions[0],
     );
     let mut status = Vec::<Line>::new();
@@ -1580,9 +1844,6 @@ fn render_pr(
             description
         })),
     };
-    let wide = area.width >= 90;
-    let panes = Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
-        .split(regions[1]);
     let title = match tab {
         1 => "Description | [Comments] | Status",
         2 => "Description | Comments | [Status]",
@@ -1591,55 +1852,295 @@ fn render_pr(
     frame.render_widget(
         Paragraph::new(body)
             .wrap(Wrap { trim: false })
-            .scroll((scroll[if wide { 0 } else { focus }], 0))
-            .block(
-                Block::bordered()
-                    .title(title)
-                    .border_style(Style::default().fg(if focus == 0 {
-                        Color::Cyan
-                    } else {
-                        Color::DarkGray
-                    })),
-            ),
-        if wide { panes[0] } else { regions[1] },
+            .scroll((
+                scroll[if wide { 1 } else { 0 }],
+                horizontal[if wide { 1 } else { 0 }],
+            ))
+            .block(pane_block(title, !wide || focus == 1)),
+        if wide { columns[1] } else { regions[1] },
     );
     if wide {
         frame.render_widget(
             Paragraph::new(status)
                 .wrap(Wrap { trim: false })
-                .scroll((scroll[1], 0))
-                .block(
-                    Block::bordered()
-                        .title("Review status")
-                        .border_style(Style::default().fg(if focus == 1 {
-                            Color::Cyan
-                        } else {
-                            Color::DarkGray
-                        })),
-                ),
-            panes[1],
+                .scroll((scroll[0], horizontal[0]))
+                .block(pane_block("Review status", focus == 0)),
+            regions[1],
         );
     }
 }
 
+fn section_index(screen: &Screen) -> Option<usize> {
+    match screen {
+        Screen::Pipelines(_) | Screen::Recent(_) | Screen::Runs { .. } | Screen::Watch(_) => {
+            Some(0)
+        }
+        Screen::Prs(_) | Screen::Pr { .. } => Some(1),
+        Screen::Repos(_) => Some(2),
+        _ => None,
+    }
+}
+
+fn pane_count(screen: &Screen, area: Rect) -> usize {
+    match screen {
+        Screen::Watch(_) => 3,
+        Screen::Pipelines(_) | Screen::Repos(_) => 2,
+        Screen::Prs(_) | Screen::Pr { .. } if area.width >= 90 => 2,
+        _ => 1,
+    }
+}
+
+fn command_hints(app: &App) -> Vec<(String, bool)> {
+    let hints: &[&str] = if app.help_scroll.is_some() {
+        &["Scroll [↑↓]", "Page [PgUp/PgDn]", "Close [Esc]"]
+    } else if app.confirm.is_some() {
+        &["Confirm [y]", "Cancel [n/Esc]"]
+    } else if let Some(form) = &app.form {
+        if form.fields.get(form.selected).is_some_and(Field::multiline) {
+            &[
+                "Save [Ctrl+S]",
+                "New line [Enter]",
+                "Field [Tab]",
+                "Clear [Ctrl+U]",
+                "Cancel [Esc]",
+            ]
+        } else {
+            &[
+                "Save [Enter/Ctrl+S]",
+                "Field [Tab]",
+                "Clear [Ctrl+U]",
+                "Cancel [Esc]",
+            ]
+        }
+    } else if app.settings_menu.is_some() {
+        &["Select [↑↓]", "Open [Enter]", "Close [Esc]"]
+    } else if app.pr_actions {
+        &[
+            "Approve [v]",
+            "Comment [c]",
+            "Edit [e]",
+            "Merge [m]",
+            "Abandon [a]",
+            "Reactivate [r]",
+            "New [n]",
+            "Close [Esc]",
+        ]
+    } else {
+        match &app.screen {
+            Screen::Home => &[
+                "Pipelines [1]",
+                "Pull requests [2]",
+                "Repositories [3]",
+                "Settings [s]",
+                "Assigned [i]",
+            ],
+            Screen::Organizations(_) | Screen::Projects(_) => {
+                &["Select [↑↓]", "Use [Enter]", "Cancel [Esc]"]
+            }
+            Screen::Prs(_) if app.pane_focus == 0 => &[
+                "Open [Enter]",
+                "New [n]",
+                "Assigned [i]",
+                "Detail [→]",
+                "Refresh [F5]",
+            ],
+            Screen::Repos(_) if app.pane_focus == 0 => {
+                &["Details [Enter]", "Detail pane [→]", "Refresh [F5]"]
+            }
+            Screen::Repos(_) => &["Scroll [↑↓]", "List [←]", "Refresh [F5]"],
+            Screen::Prs(_) => &[
+                "Scroll [↑↓]",
+                "Open [Enter]",
+                "List [←]",
+                "New [n]",
+                "Assigned [i]",
+                "Refresh [F5]",
+            ],
+            Screen::Pr { .. } => &[
+                "Approve [v]",
+                "Actions [?]",
+                "Tabs [ / ]",
+                "Scroll [↑↓]",
+                "Back [Esc]",
+                "Refresh [F5]",
+            ],
+            Screen::Pipelines(_) => &[
+                "Runs [Enter]",
+                "Edit [e]",
+                "Move [m]",
+                "Recent [r]",
+                "Refresh [F5]",
+            ],
+            Screen::Recent(_) => &["Open [Enter]", "All pipelines [a]", "Refresh [F5]"],
+            Screen::Runs { .. } => &["Open [Enter]", "Back [Esc]", "Refresh [F5]"],
+            Screen::Watch(_) if app.pane_focus == 2 && app.run_list.is_some() => {
+                &["Select run [↑↓]", "Open [Enter]", "Back [Esc]"]
+            }
+            Screen::Watch(_) if app.pane_focus == 0 => {
+                &["Task [↑↓]", "Logs [→]", "Follow [f]", "Back [Esc]"]
+            }
+            Screen::Watch(_) => &["Scroll [↑↓]", "Follow [f]", "Tasks [←]", "Back [Esc]"],
+        }
+    };
+    let empty = match &app.screen {
+        Screen::Prs(items)
+        | Screen::Repos(items)
+        | Screen::Pipelines(items)
+        | Screen::Recent(items)
+        | Screen::Projects(items)
+        | Screen::Organizations(items) => items.is_empty(),
+        Screen::Runs { values, .. } => values.is_empty(),
+        _ => false,
+    };
+    let mut result: Vec<_> = hints
+        .iter()
+        .map(|hint| {
+            let enabled = !app.writing
+                && !(!matches!(app.screen, Screen::Pr { ref value } if value["status"] == "active")
+                    && *hint == "Approve [v]")
+                && !(app.form.is_none()
+                    && empty
+                    && (hint.contains("[Enter]") || hint.contains("[e]") || hint.contains("[m]")));
+            (hint.to_string(), enabled)
+        })
+        .collect();
+    if app.form.is_none()
+        && app.help_scroll.is_none()
+        && matches!(app.screen, Screen::Projects(_) | Screen::Organizations(_))
+    {
+        result.extend([("Help [h]".into(), true), ("Quit [q]".into(), true)]);
+        return result;
+    }
+    if app.form.is_none()
+        && app.confirm.is_none()
+        && app.settings_menu.is_none()
+        && !app.pr_actions
+        && app.help_scroll.is_none()
+    {
+        result.extend(
+            [
+                "Pane [w/F6]",
+                "Nav [↑↓/jk]",
+                "Page [PgUp/PgDn]",
+                "Pan [Shift+←→]",
+                "Sections [Tab/1/2/3]",
+                "Settings [s]",
+                "Help [h]",
+                "Quit [q]",
+            ]
+            .into_iter()
+            .filter(|s| !hints.contains(s))
+            .filter(|s| {
+                *s != "Settings [s]"
+                    || !matches!(app.screen, Screen::Projects(_) | Screen::Organizations(_))
+            })
+            .map(|s| (s.into(), !app.writing || s == "Quit [q]")),
+        );
+    }
+    result
+}
+
+fn draw_form(frame: &mut Frame, area: Rect, form: &Form, status: &str) {
+    let width = area.width.min(76);
+    let content_width = width.saturating_sub(4).max(1) as usize;
+    let mut lines = Vec::new();
+    let mut cursor = (0, 0);
+    for (i, field) in form.fields.iter().enumerate() {
+        lines.push(Line::styled(
+            output::cell(field.name),
+            Style::default().fg(if i == form.selected {
+                Color::White
+            } else {
+                Color::DarkGray
+            }),
+        ));
+        let style = if i == form.selected {
+            selection_style()
+        } else {
+            Style::default()
+        };
+        let mut value = String::new();
+        for ch in field.display().chars() {
+            if ch == '\n' {
+                lines.push(Line::styled(std::mem::take(&mut value), style));
+            } else {
+                if Line::raw(&value).width() + Span::raw(ch.to_string()).width() > content_width {
+                    lines.push(Line::styled(std::mem::take(&mut value), style));
+                }
+                value.push(ch);
+            }
+        }
+        if i == form.selected {
+            cursor = (Line::raw(&value).width() as u16, lines.len() as u16);
+        }
+        lines.push(Line::styled(value, style));
+        lines.push(Line::raw(""));
+    }
+    if matches!(form.kind, FormKind::PipelineEdit(_)) {
+        lines.push(Line::raw("Folder: / for root, or /Team/Project."));
+    }
+    if !status.is_empty() {
+        lines.push(Line::raw(output::cell(status)));
+    }
+    let title = match form.kind {
+        FormKind::PipelineEdit(_) => "Edit pipeline",
+        FormKind::Identity | FormKind::PatIdentity => "Sign in and setup",
+        FormKind::Create => "Create pull request",
+        FormKind::Edit(_) => "Edit pull request",
+        FormKind::Comment(_) => "Comment",
+        FormKind::Merge(_) => "Merge strategy",
+    };
+    let rect = popup(area, width, (lines.len() as u16 + 2).max(6));
+    let inner = pane_block(title, true).inner(rect);
+    let scroll = cursor.1.saturating_sub(inner.height.saturating_sub(1));
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((scroll, 0))
+            .block(pane_block(title, true)),
+        rect,
+    );
+    if inner.width > 0 && inner.height > 0 {
+        frame.set_cursor_position((
+            inner.x + cursor.0.min(inner.width - 1),
+            inner.y + cursor.1.saturating_sub(scroll).min(inner.height - 1),
+        ));
+    }
+}
+
 fn draw(frame: &mut Frame, app: &mut App) {
-    let now = time::OffsetDateTime::now_utc();
     let loading = app
         .loading_since
         .filter(|_| app.task.is_some())
         .map(|since| loading_text(app.loading_label, since.elapsed(), app.writing));
     let status_text = match &loading {
         Some(message) if !app.status.is_empty() && app.status != "Loading..." => {
-            format!("{message}\n{}", app.status)
+            format!("{message} | {}", app.status)
         }
         Some(message) => message.clone(),
         None => app.status.clone(),
     };
     let area = frame.area();
+    app.viewport = area;
+    app.pane_focus = app.pane_focus.min(pane_count(&app.screen, area) - 1);
+    frame.render_widget(
+        Block::default().style(Style::default().fg(Color::Gray).bg(Color::Black)),
+        area,
+    );
+    let commands = command_hints(app);
+    let expandable = app.form.is_none()
+        && app.confirm.is_none()
+        && app.settings_menu.is_none()
+        && !app.pr_actions
+        && app.help_scroll.is_none();
+    let expanded = expandable && app.expanded_commands;
+    let footer_rows = command_rows(&commands, area.width, expanded, expandable)
+        .min(area.height.saturating_sub(6).max(1));
     let layout = Layout::vertical([
-        Constraint::Length(4),
-        Constraint::Min(1),
-        Constraint::Length(5),
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(u16::from(!status_text.is_empty())),
+        Constraint::Length(footer_rows),
     ])
     .split(area);
     let context = app
@@ -1647,51 +2148,219 @@ fn draw(frame: &mut Frame, app: &mut App) {
         .target(app.org.as_deref(), app.project.as_deref())
         .map(|t| format!("{} / {}", t.organization, t.project))
         .unwrap_or_else(|_| "Setup required".into());
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                output::cell(&format!(" DevOps   {context}")),
-                Style::default().fg(Color::Cyan).bold(),
-            )),
-            Line::from(vec![
-                Span::styled(
-                    " 1 ▶ Pipelines ",
-                    if matches!(
-                        app.screen,
-                        Screen::Pipelines(_)
-                            | Screen::Recent(_)
-                            | Screen::Runs { .. }
-                            | Screen::Watch(_)
-                    ) {
-                        Style::default().bg(Color::Cyan).fg(Color::Black).bold()
-                    } else {
-                        Style::default()
-                    },
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    " 2 ⑂ Pull requests ",
-                    if matches!(app.screen, Screen::Prs(_) | Screen::Pr { .. }) {
-                        Style::default().bg(Color::Cyan).fg(Color::Black).bold()
-                    } else {
-                        Style::default()
-                    },
-                ),
-            ]),
-        ])
-        .block(Block::default().borders(Borders::BOTTOM)),
-        layout[0],
-    );
-    let help = match &mut app.screen {
-        Screen::Home => {
-            frame.render_widget(Paragraph::new("Your project is remembered between sessions.\n\n1  Pipelines         Browse runs and follow logs\n2  Pull requests     Review and manage your team's work\ns  Settings          Current project and account\nq  Quit\n\nUse Tab to switch between pull requests and pipelines.\nSelect a row with Up/Down or j/k; press Enter to open it.").block(Block::bordered().title("Home")),layout[1]);
-            "p: PRs   i: assigned reviews   l: pipelines   s: settings   q: quit"
+    draw_header(frame, layout[0], section_index(&app.screen), &context);
+    draw_screen(frame, app, layout[1]);
+    frame.render_widget(Paragraph::new(output::cell(&status_text)), layout[2]);
+    draw_commands(frame, layout[3], &commands, expanded, expandable);
+    if let Some(selected) = app.settings_menu {
+        let popup = popup(area, 66, 6);
+        frame.render_widget(Clear, popup);
+        let rows = vec![
+            format!(
+                "Current project   {}",
+                app.settings.project.as_deref().unwrap_or("Not selected")
+            ),
+            "Account           Sign in or replace token".into(),
+        ];
+        let mut state = ListState::default().with_selected(Some(selected));
+        draw_list(
+            frame,
+            popup,
+            pane_block("Settings", true),
+            rows,
+            &mut state,
+            0,
+        );
+    }
+    if let Some(form) = &app.form {
+        if let FormKind::PipelineEdit(id) = form.kind {
+            draw_pipeline_editor(frame, layout[1], app, form, id);
+        } else {
+            draw_form(frame, layout[1], form, &app.status);
         }
-        Screen::Organizations(items) => {
+    }
+    if app.pr_actions {
+        let popup = popup(area, 45, 12);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new("v  Approve\nc  Comment\ne  Edit\nm  Merge\na  Abandon\nr  Reactivate\nn  Create a PR\n\nPress an action key. Esc to close.")
+                .block(pane_block("PR actions", true)),
+            popup,
+        );
+    }
+    if let Some(command) = &app.confirm {
+        let operation = match command {
+            PrCommand::Merge { id, .. } => format!("Complete/merge PR {id}"),
+            PrCommand::Abandon { id, .. } => format!("Abandon PR {id}"),
+            PrCommand::Review { id, .. } => format!("Approve PR {id}"),
+            _ => String::new(),
+        };
+        let popup = popup(area, 68, 9);
+        let detail = if let Screen::Pr { value } = &app.screen {
+            format!(
+                "{}\n{} -> {}",
+                text(value, "title"),
+                text(value, "sourceRefName").trim_start_matches("refs/heads/"),
+                text(value, "targetRefName").trim_start_matches("refs/heads/")
+            )
+        } else {
+            String::new()
+        };
+        let strategy = if let PrCommand::Merge { strategy, .. } = command {
+            format!(
+                "\nStrategy: {}",
+                strategy
+                    .to_possible_value()
+                    .map(|v| v.get_name().to_owned())
+                    .unwrap_or_default()
+            )
+        } else {
+            String::new()
+        };
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{operation}?\n{}\nTarget: {}{}\n\ny: confirm   n/Esc: cancel",
+                output::clean(&detail),
+                output::cell(&context),
+                strategy
+            ))
+            .wrap(Wrap { trim: false })
+            .block(pane_block("Confirm remote write", true)),
+            popup,
+        );
+    }
+    if let Some(scroll) = app.help_scroll.take() {
+        let mut lines: Vec<Line> = command_hints(app)
+            .into_iter()
+            .map(|(s, enabled)| {
+                Line::styled(
+                    s,
+                    if enabled {
+                        Style::default()
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                )
+            })
+            .collect();
+        lines.extend(
+            [
+                "",
+                "Tab / Shift+Tab switch sections; w or F6 changes pane.",
+                "Right enters details; Left returns to the list.",
+                "Use [ and ] for PR detail tabs, Shift+arrows to pan.",
+                "Forms: Tab changes fields. Ctrl+U clears a field.",
+                "Enter inserts a line in Description and Comment.",
+                "Ctrl+S submits; Enter also submits single-line fields.",
+                "Esc closes the current dialog or returns to the list.",
+            ]
+            .into_iter()
+            .map(Line::raw),
+        );
+        let width = layout[1].width.min(72).saturating_sub(2).max(1) as usize;
+        let lines: Vec<Line> = lines
+            .into_iter()
+            .flat_map(|line| {
+                let mut wrapped = Vec::new();
+                let mut part = String::new();
+                for ch in line.to_string().chars() {
+                    if Line::raw(&part).width() + Span::raw(ch.to_string()).width() > width
+                        && !part.is_empty()
+                    {
+                        wrapped.push(Line::styled(std::mem::take(&mut part), line.style));
+                    }
+                    part.push(ch);
+                }
+                wrapped.push(Line::styled(part, line.style));
+                wrapped
+            })
+            .collect();
+        let rect = popup(layout[1], 72, lines.len() as u16 + 2);
+        let scroll = scroll.min((lines.len() as u16).saturating_sub(rect.height.saturating_sub(2)));
+        app.help_scroll = Some(scroll);
+        frame.render_widget(Clear, rect);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .scroll((scroll, 0))
+                .block(pane_block("Keyboard shortcuts", true)),
+            rect,
+        );
+    }
+}
+
+fn draw_screen(frame: &mut Frame, app: &mut App, area: Rect) {
+    let now = time::OffsetDateTime::now_utc();
+    let loading = app
+        .loading_since
+        .map(|since| loading_text(app.loading_label, since.elapsed(), app.writing));
+    if matches!(app.screen, Screen::Projects(_))
+        && let Some(mut view) = app.picker_return.take()
+    {
+        app.swap_view(&mut view);
+        draw_screen(frame, app, area);
+        app.swap_view(&mut view);
+        app.picker_return = Some(view);
+    }
+    match &mut app.screen {
+        Screen::Repos(items) => {
+            let panes = if area.width >= 90 {
+                Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+                    .split(area)
+            } else {
+                Layout::vertical([Constraint::Percentage(40), Constraint::Percentage(60)])
+                    .split(area)
+            };
+            let details = items.get(app.selection.selected().unwrap_or(0)).map(|repo| {
+                let branch = text(repo, "defaultBranch").trim_start_matches("refs/heads/");
+                format!("{}\n\nDefault branch: {}\nStatus: {}\nID: {}\n\nHTTPS clone\n{}\n\nSSH clone\n{}\n\nWeb\n{}",
+                    text(repo, "name"), if branch.is_empty() { "Not set" } else { branch },
+                    if repo["isDisabled"] == true { "Disabled" } else { "Enabled" }, text(repo, "id"),
+                    text(repo, "remoteUrl"), text(repo, "sshUrl"), text(repo, "webUrl"))
+            }).unwrap_or_else(|| if app.task.is_some() { "Loading repositories...".into() } else { "No repositories in this project. Press F5 to refresh.".into() });
             draw_list(
                 frame,
-                layout[1],
-                "Select organization",
+                panes[0],
+                pane_block("Repositories", app.pane_focus == 0),
+                items
+                    .iter()
+                    .map(|repo| {
+                        format!(
+                            "{}{}",
+                            text(repo, "name"),
+                            if repo["isDisabled"] == true {
+                                " (disabled)"
+                            } else {
+                                ""
+                            }
+                        )
+                    })
+                    .collect(),
+                &mut app.selection,
+                app.pane_x[0],
+            );
+            frame.render_widget(
+                Paragraph::new(output::clean(&details))
+                    .wrap(Wrap { trim: false })
+                    .scroll((app.detail_scroll, app.pane_x[1]))
+                    .block(pane_block("Repository details", app.pane_focus == 1)),
+                panes[1],
+            );
+        }
+        Screen::Home => {
+            frame.render_widget(Paragraph::new("Your project is remembered between sessions.\n\n1  Pipelines         Browse runs and follow logs\n2  Pull requests     Review and manage your team's work\n3  Repositories      Browse repositories and clone URLs\ns  Settings          Current project and account\nq  Quit\n\nUse Tab to cycle pipelines, pull requests, and repositories.\nSelect a row with Up/Down or j/k; press Enter to open it.").block(pane_block("Home", true)),area);
+        }
+        Screen::Organizations(items) => {
+            let rect = popup(
+                area,
+                72,
+                (items.len() as u16).saturating_add(4).clamp(6, 20),
+            );
+            frame.render_widget(Clear, rect);
+            draw_list(
+                frame,
+                rect,
+                pane_block("Select organization", true),
                 items
                     .iter()
                     .map(|v| text(v, "accountName").into())
@@ -1699,25 +2368,44 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 &mut app.selection,
                 app.pane_x[0],
             );
-            "Up/Down: select   Enter: continue   Esc: home"
         }
         Screen::Projects(items) => {
+            let rect = popup(
+                area,
+                72,
+                (items.len() as u16).saturating_add(4).clamp(6, 20),
+            );
+            frame.render_widget(Clear, rect);
             draw_list(
                 frame,
-                layout[1],
-                "Choose current project (remembered next time)",
-                items.iter().map(|v| text(v, "name").into()).collect(),
+                rect,
+                pane_block("Current project", true),
+                items
+                    .iter()
+                    .map(|v| {
+                        format!(
+                            "{} {}",
+                            if Some(text(v, "name")) == app.settings.project.as_deref()
+                                && app.setup_org == app.settings.organization
+                            {
+                                "*"
+                            } else {
+                                " "
+                            },
+                            text(v, "name")
+                        )
+                    })
+                    .collect(),
                 &mut app.selection,
                 app.pane_x[0],
             );
-            "Up/Down: select   Enter: use and remember   Esc: cancel"
         }
         Screen::Prs(items) => {
-            let panes = if layout[1].width >= 90 {
-                Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
-                    .split(layout[1])
+            let panes = if area.width >= 90 {
+                Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+                    .split(area)
             } else {
-                Layout::horizontal([Constraint::Percentage(100)]).split(layout[1])
+                Layout::horizontal([Constraint::Percentage(100)]).split(area)
             };
             if panes.len() > 1 {
                 let preview = items
@@ -1737,26 +2425,41 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 frame.render_widget(
                     Paragraph::new(output::clean(&preview))
                         .wrap(Wrap { trim: false })
-                        .block(
-                            Block::bordered()
-                                .border_style(if app.pane_focus == 1 {
-                                    Style::default().fg(Color::Cyan)
-                                } else {
-                                    Style::default()
-                                })
-                                .title("Preview"),
-                        ),
+                        .scroll((app.detail_scroll, app.pane_x[1]))
+                        .block(pane_block("Preview", app.pane_focus == 1)),
                     panes[1],
                 );
             }
+            let list_area = if panes.len() > 1 && area.height >= 12 {
+                let left =
+                    Layout::vertical([Constraint::Percentage(65), Constraint::Percentage(35)])
+                        .split(panes[0]);
+                let summary = items.get(app.selection.selected().unwrap_or(0)).map(|pr| {
+                    let reviewers = pr_rows(&pr["reviewers"]);
+                    let approved = reviewers.iter().filter(|r| r["vote"].as_i64().unwrap_or(0) > 0).count();
+                    format!("Author: {}\nStatus: {}{}\nReviews: {approved}/{} approved\nRepository: {}", text(&pr["createdBy"], "displayName"), text(pr, "status"), if pr["isDraft"] == true { " (draft)" } else { "" }, reviewers.len(), text(&pr["repository"], "name"))
+                }).unwrap_or_else(|| "Select a pull request.".into());
+                frame.render_widget(
+                    Paragraph::new(output::clean(&summary))
+                        .wrap(Wrap { trim: false })
+                        .block(pane_block("Review summary", false)),
+                    left[1],
+                );
+                left[0]
+            } else {
+                panes[0]
+            };
             draw_list(
                 frame,
-                panes[0],
-                if app.attention {
-                    "Assigned reviews needing attention"
-                } else {
-                    "Active pull requests"
-                },
+                list_area,
+                pane_block(
+                    if app.attention {
+                        "Assigned reviews needing attention"
+                    } else {
+                        "Active pull requests"
+                    },
+                    app.pane_focus == 0,
+                ),
                 items
                     .iter()
                     .map(|v| {
@@ -1771,26 +2474,25 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 &mut app.selection,
                 app.pane_x[0],
             );
-            "Enter: view   n: create   i: toggle assigned reviews   F5: refresh   Esc: home"
         }
         Screen::Pr { value, .. } => {
             render_pr(
                 frame,
-                layout[1],
+                area,
                 value,
                 app.pr_tab,
                 app.pane_focus,
                 app.pane_y,
+                app.pane_x,
             );
-            "v: Approve   ?: More actions   Esc: Back\nLeft/Right: tabs   F6: focus   F5: refresh"
         }
         Screen::Pipelines(items) => {
-            let panes = if layout[1].width >= 90 {
+            let panes = if area.width >= 90 {
                 Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-                    .split(layout[1])
+                    .split(area)
             } else {
                 Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)])
-                    .split(layout[1])
+                    .split(area)
             };
             let name = items
                 .get(app.selection.selected().unwrap_or(0))
@@ -1829,7 +2531,10 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 Paragraph::new(output::clean(&activity))
                     .wrap(Wrap { trim: false })
                     .scroll((app.detail_scroll, app.pane_x[1]))
-                    .block(Block::bordered().title(output::cell(&format!("Activity | {name}")))),
+                    .block(pane_block(
+                        output::cell(&format!("Activity | {name}")),
+                        app.pane_focus == 1,
+                    )),
                 panes[1],
             );
             let mut previous_folder = String::new();
@@ -1861,7 +2566,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             draw_table(
                 frame,
                 panes[0],
-                "Pipelines by folder",
+                pane_block("Pipelines by folder", app.pane_focus == 0),
                 ["Folder", "Pipeline", "ID"].to_vec(),
                 rows,
                 vec![
@@ -1871,7 +2576,6 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 ],
                 &mut app.selection,
             );
-            "r: recent runs   Up/Down: pipeline   Enter: runs   e: edit name/folder   m: move   F5: refresh"
         }
         Screen::Recent(items) => {
             let rows = items
@@ -1904,8 +2608,8 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 .collect();
             draw_table(
                 frame,
-                layout[1],
-                "Recent runs | newest first",
+                area,
+                pane_block("Recent runs | newest first", app.pane_focus == 0),
                 vec!["Status", "Pipeline", "Run", "Branch", "Queued", "Duration"],
                 rows,
                 vec![
@@ -1918,7 +2622,6 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 ],
                 &mut app.selection,
             );
-            "Up/Down: run   Enter: timeline and logs   a: all pipelines   F5: refresh"
         }
         Screen::Runs { values, .. } => {
             let rows = values
@@ -1951,8 +2654,8 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 .collect();
             draw_table(
                 frame,
-                layout[1],
-                "Recent runs",
+                area,
+                pane_block("Recent runs", app.pane_focus == 0),
                 vec!["Status", "ID", "Run", "Created", "Duration"],
                 rows,
                 vec![
@@ -1964,158 +2667,50 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 ],
                 &mut app.selection,
             );
-            "Enter: observe   F5: refresh   Esc: home"
         }
         Screen::Watch(viewer) => {
-            draw_viewer(
-                frame,
-                layout[1],
-                viewer,
-                app.pane_focus,
-                app.pane_x,
-                app.pane_y,
-            );
-            "F6: tasks / logs / summary   ←→: horizontal   f: follow   Esc: back"
+            draw_viewer(frame, area, viewer, app.pane_focus, app.pane_x, app.pane_y);
+            if let Some(list) = &mut app.run_list {
+                let rows = list
+                    .items
+                    .iter()
+                    .map(|run| {
+                        let current = if run["id"] == viewer.run["id"] {
+                            &viewer.run
+                        } else {
+                            run
+                        };
+                        format!(
+                            "{} #{} {}",
+                            run_icon(current),
+                            scalar(&run["id"]),
+                            if text(run, "name").is_empty() {
+                                text(current, "buildNumber")
+                            } else {
+                                text(run, "name")
+                            }
+                        )
+                    })
+                    .collect();
+                let elapsed = run_timer(&viewer.run, now);
+                let runs_area = viewer_areas(area)[2];
+                frame.render_widget(Clear, runs_area);
+                draw_list(
+                    frame,
+                    runs_area,
+                    pane_block(format!("Recent runs | {elapsed}"), app.pane_focus == 2)
+                        .title_bottom(output::cell(&format!(
+                            "{} | {}",
+                            text(&viewer.run["definition"], "name"),
+                            text(&viewer.run, "sourceBranch").trim_start_matches("refs/heads/")
+                        ))),
+                    rows,
+                    &mut list.selection,
+                    app.pane_x[2],
+                );
+            }
         }
     };
-    let empty = match &app.screen {
-        Screen::Prs(items) | Screen::Pipelines(items) | Screen::Recent(items) => items.is_empty(),
-        _ => false,
-    };
-    if empty && let Some(message) = &loading {
-        frame.render_widget(Clear, layout[1]);
-        frame.render_widget(
-            Paragraph::new(message.as_str())
-                .wrap(Wrap { trim: false })
-                .style(Style::default().fg(Color::Cyan))
-                .block(Block::bordered().title("Loading")),
-            layout[1],
-        );
-    }
-    let navigation = if matches!(
-        app.screen,
-        Screen::Pr { .. } | Screen::Watch(_) | Screen::Home
-    ) {
-        ""
-    } else {
-        "F6: pane   ←→: scroll"
-    };
-    frame.render_widget(
-        Paragraph::new(output::clean(&format!(
-            "{help}   {navigation}\n{}",
-            status_text
-        )))
-        .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::TOP)),
-        layout[2],
-    );
-    if let Some(selected) = app.settings_menu {
-        let popup = center(area, 65, 45);
-        frame.render_widget(Clear, popup);
-        let rows = vec![
-            format!(
-                "Current project   {}",
-                app.settings.project.as_deref().unwrap_or("Not selected")
-            ),
-            "Account           Sign in or replace token".into(),
-        ];
-        let mut state = ListState::default().with_selected(Some(selected));
-        draw_list(
-            frame,
-            popup,
-            "Settings | Enter: open  Esc: close",
-            rows,
-            &mut state,
-            0,
-        );
-    }
-    if let Some(form) = &app.form {
-        let pipeline_edit = matches!(form.kind, FormKind::PipelineEdit(_));
-        let popup = if pipeline_edit {
-            center(area, 80, 60)
-        } else {
-            center(area, 90, 85)
-        };
-        frame.render_widget(Clear, popup);
-        let mut lines = vec![
-            Line::from(if pipeline_edit {
-                "Tab: field   Ctrl+U: clear   Enter: save   Esc: cancel"
-            } else {
-                "Tab/Up/Down: field   Ctrl+U: clear   Enter: submit   Esc: cancel"
-            }),
-            Line::from(""),
-        ];
-        for (i, field) in form.fields.iter().enumerate() {
-            let style = if i == form.selected {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default()
-            };
-            lines.push(Line::styled(
-                format!(
-                    "{}{}",
-                    if i == form.selected { "> " } else { "  " },
-                    field.name
-                ),
-                style,
-            ));
-            lines.push(Line::styled(format!("  {}", field.display()), style));
-            lines.push(Line::from(""));
-        }
-        if pipeline_edit {
-            lines.push(Line::from(
-                "Folder: / for root, or /Team/Project. Blank moves to root.",
-            ));
-            lines.push(Line::from(if app.writing {
-                "Saving pipeline...".into()
-            } else {
-                output::clean(&app.status)
-            }));
-        }
-        let title = if pipeline_edit {
-            "Edit pipeline"
-        } else if matches!(form.kind, FormKind::Identity | FormKind::PatIdentity) {
-            "Sign in and setup"
-        } else {
-            "Pull request action"
-        };
-        let scroll =
-            (form.selected * 3).saturating_sub(popup.height.saturating_sub(7) as usize) as u16;
-        frame.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .scroll((scroll, 0))
-                .block(Block::bordered().title(title)),
-            popup,
-        );
-    }
-    if app.pr_actions {
-        let popup = center(area, 60, 70);
-        frame.render_widget(Clear, popup);
-        frame.render_widget(
-            Paragraph::new("v  Approve\nc  Comment\ne  Edit\nm  Merge\na  Abandon\nr  Reactivate\nn  Create a PR\n\nPress an action key. Esc to close.")
-                .block(Block::bordered().title("PR actions")),
-            popup,
-        );
-    }
-    if let Some(command) = &app.confirm {
-        let operation = match command {
-            PrCommand::Merge { id, .. } => format!("Complete/merge PR {id}"),
-            PrCommand::Abandon { id, .. } => format!("Abandon PR {id}"),
-            PrCommand::Review { id, .. } => format!("Approve PR {id}"),
-            _ => String::new(),
-        };
-        let popup = center(area, 70, 30);
-        frame.render_widget(Clear, popup);
-        frame.render_widget(
-            Paragraph::new(format!(
-                "{operation}?\nTarget: {}\n\ny: confirm   n/Esc: cancel",
-                output::cell(&context)
-            ))
-            .block(Block::bordered().title("Confirm remote write")),
-            popup,
-        );
-    }
 }
 
 fn pipeline_folder(value: &Value) -> String {
@@ -2139,7 +2734,7 @@ fn sort_pipelines(items: &mut [Value]) {
 fn draw_table(
     frame: &mut Frame,
     area: Rect,
-    title: &str,
+    block: Block<'static>,
     headers: Vec<&str>,
     rows: Vec<Row<'static>>,
     widths: Vec<Constraint>,
@@ -2155,15 +2750,11 @@ fn draw_table(
     };
     frame.render_stateful_widget(
         Table::new(rows, widths)
-            .header(
-                Row::new(headers)
-                    .style(Style::default().fg(Color::Cyan).bold())
-                    .bottom_margin(1),
-            )
-            .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::Cyan).bold())
+            .header(Row::new(headers).style(Style::default().fg(Color::DarkGray)))
+            .row_highlight_style(selection_style())
             .highlight_symbol("> ")
-            .column_spacing(2)
-            .block(Block::bordered().title(title)),
+            .column_spacing(1)
+            .block(block),
         area,
         &mut state,
     );
@@ -2192,7 +2783,7 @@ fn run_icon(run: &Value) -> &'static str {
 fn draw_list(
     frame: &mut Frame,
     area: Rect,
-    title: &str,
+    block: Block<'static>,
     items: Vec<String>,
     state: &mut ListState,
     horizontal: u16,
@@ -2216,8 +2807,8 @@ fn draw_list(
     frame.render_stateful_widget(
         List::new(items)
             .highlight_symbol("> ")
-            .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::Cyan).bold())
-            .block(Block::bordered().title(title)),
+            .highlight_style(selection_style())
+            .block(block),
         area,
         state,
     );
@@ -2286,6 +2877,22 @@ fn run_timer(value: &Value, now: time::OffsetDateTime) -> String {
     )
 }
 
+fn viewer_areas(area: Rect) -> [Rect; 3] {
+    if area.width >= 90 {
+        let columns = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(area);
+        let left = Layout::vertical([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(columns[0]);
+        [left[1], columns[1], left[0]]
+    } else {
+        let rows =
+            Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]).split(area);
+        let top = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(rows[0]);
+        [top[1], rows[1], top[0]]
+    }
+}
+
 fn draw_viewer(
     frame: &mut Frame,
     area: Rect,
@@ -2294,7 +2901,7 @@ fn draw_viewer(
     horizontal: [u16; 3],
     vertical: [u16; 3],
 ) {
-    let panes = Layout::vertical([Constraint::Length(8), Constraint::Min(1)]).split(area);
+    let [tasks, logs, summary] = viewer_areas(area);
     let now = time::OffsetDateTime::now_utc();
     let elapsed = run_timer(&viewer.run, now);
     frame.render_widget(
@@ -2303,22 +2910,15 @@ fn draw_viewer(
             build_summary(&viewer.run)
         )))
         .scroll((vertical[2], horizontal[2]))
-        .block(
-            Block::bordered()
-                .border_style(if focus == 2 {
-                    Style::default().fg(Color::Cyan)
-                } else {
-                    Style::default()
-                })
-                .title(format!(
-                    "{} | Elapsed: {elapsed}",
-                    if viewer.follow { "Following" } else { "Paused" }
-                )),
-        ),
-        panes[0],
+        .block(pane_block(
+            format!(
+                "{} | Elapsed: {elapsed}",
+                if viewer.follow { "Following" } else { "Paused" }
+            ),
+            focus == 2,
+        )),
+        summary,
     );
-    let columns = Layout::horizontal([Constraint::Percentage(32), Constraint::Percentage(68)])
-        .split(panes[1]);
     let labels = viewer
         .records
         .iter()
@@ -2344,17 +2944,13 @@ fn draw_viewer(
     let mut selected = ListState::default().with_selected(Some(viewer.selection()));
     draw_list(
         frame,
-        columns[0],
-        if focus == 0 {
-            "▶ Stage / job / task"
-        } else {
-            "Stage / job / task"
-        },
+        tasks,
+        pane_block("Stage / job / task", focus == 0),
         labels,
         &mut selected,
         0,
     );
-    let offset = viewer.offset(columns[1].height.saturating_sub(2) as usize);
+    let offset = viewer.offset(logs.height.saturating_sub(2) as usize);
     let log = if viewer.visible_log().lines.is_empty() {
         if !viewer.error.is_empty() {
             viewer.error.clone()
@@ -2385,46 +2981,118 @@ fn draw_viewer(
         .map(|record| run_timer(record, now))
         .unwrap_or_else(|| "Not started".into());
     let title = format!(
-        "Task logs | {task_timer} | {} | {} | retained from line {}",
+        "Task logs | {} | {task_timer}",
+        if viewer.follow { "Following" } else { "Paused" },
+    );
+    let source = format!(
+        "{} | from line {} | {}",
         if viewer.showing_live() {
             "live console tail"
         } else {
             "uploaded log"
         },
-        if viewer.follow {
-            "following"
-        } else {
-            "scroll paused"
-        },
-        viewer.visible_log().base
+        viewer.visible_log().base,
+        output::cell(&viewer.live_status),
     );
     frame.render_widget(
-        Paragraph::new(log).scroll((offset, horizontal[1])).block(
-            Block::bordered()
-                .border_style(if focus == 1 {
-                    Style::default().fg(Color::Cyan)
-                } else {
-                    Style::default()
-                })
-                .title(title)
-                .title_bottom(output::clean(&viewer.live_status)),
-        ),
-        columns[1],
+        Paragraph::new(log)
+            .scroll((offset, horizontal[1]))
+            .block(pane_block(title, focus == 1).title_bottom(source)),
+        logs,
     );
 }
-fn center(area: Rect, width: u16, height: u16) -> Rect {
-    let vertical = Layout::vertical([
-        Constraint::Percentage((100 - height) / 2),
-        Constraint::Percentage(height),
-        Constraint::Percentage((100 - height) / 2),
+fn draw_pipeline_editor(frame: &mut Frame, area: Rect, app: &App, form: &Form, id: i32) {
+    let name = if let Screen::Pipelines(items) = &app.screen {
+        items
+            .iter()
+            .find(|item| item["id"] == id)
+            .map(|item| text(item, "name"))
+            .unwrap_or("")
+    } else {
+        ""
+    };
+    let popup = popup(area, 64, 18);
+    frame.render_widget(Clear, popup);
+    let block = pane_block(output::cell(&format!("Edit pipeline · {name}")), true);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let inner = inner.inner(Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
+    let sections = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(2),
+        Constraint::Length(2),
     ])
-    .split(area);
-    Layout::horizontal([
-        Constraint::Percentage((100 - width) / 2),
-        Constraint::Percentage(width),
-        Constraint::Percentage((100 - width) / 2),
-    ])
-    .split(vertical[1])[1]
+    .split(inner);
+    for (i, field) in form.fields.iter().take(2).enumerate() {
+        let focused = i == form.selected;
+        let style = Style::default().fg(if focused {
+            Color::White
+        } else {
+            Color::DarkGray
+        });
+        let field_block = Block::bordered().title(field.name).border_style(style);
+        let field_area = field_block.inner(sections[i]);
+        let value = field.display();
+        let width = field_area.width.saturating_sub(1) as usize;
+        let offset = if focused {
+            value.chars().count().saturating_sub(width)
+        } else {
+            0
+        };
+        let visible = value.chars().skip(offset).collect::<String>();
+        frame.render_widget(
+            Paragraph::new(visible.clone()).block(field_block),
+            sections[i],
+        );
+        if focused && !app.writing && field_area.width > 0 && field_area.height > 0 {
+            let x = (Line::from(visible).width() as u16).min(field_area.width - 1);
+            frame.set_cursor_position((field_area.x + x, field_area.y));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new("Use / or blank for root. New folders are allowed.")
+            .style(Style::default().fg(Color::DarkGray))
+            .wrap(Wrap { trim: false }),
+        sections[2],
+    );
+    let status = if app.writing {
+        "Saving pipeline...".into()
+    } else {
+        output::clean(&app.status)
+    };
+    frame.render_widget(
+        Paragraph::new(status)
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(if app.writing { Color::Cyan } else { Color::Red })),
+        sections[3],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                if app.writing {
+                    " Saving... "
+                } else {
+                    " Enter Save "
+                },
+                selection_style(),
+            ),
+            Span::raw("   Esc Cancel"),
+        ]))
+        .block(Block::default().borders(Borders::TOP)),
+        sections[4],
+    );
+    frame.render_widget(
+        Paragraph::new("Tab / Shift+Tab: field   Ctrl+U: clear")
+            .style(Style::default().fg(Color::DarkGray))
+            .wrap(Wrap { trim: false }),
+        sections[5],
+    );
 }
 
 #[cfg(test)]
@@ -2537,7 +3205,9 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("Edit pipeline"));
+        assert!(rendered.contains("Edit pipeline · Build"));
+        assert!(rendered.contains("Enter Save"));
+        assert!(rendered.contains("Esc Cancel"));
         assert!(rendered.contains("Permission denied"));
         app.writing = true;
         app.handle(key(KeyCode::Esc))?;
@@ -2567,7 +3237,7 @@ mod tests {
         Ok(())
     }
 
-    fn fixture() -> Result<(tempfile::TempDir, App)> {
+    pub(super) fn fixture() -> Result<(tempfile::TempDir, App)> {
         let root = tempfile::tempdir()?;
         let (tx, _rx) = mpsc::unbounded_channel();
         let app = App::new(
@@ -2613,9 +3283,9 @@ mod tests {
         app.load_prs()?;
         let old_generation = app.generation;
         app.handle(key(KeyCode::Tab))?;
-        assert!(matches!(app.screen, Screen::Recent(_)));
+        assert!(matches!(app.screen, Screen::Repos(_)));
         app.receive((old_generation, Message::Prs(vec![])));
-        assert!(matches!(app.screen, Screen::Recent(_)));
+        assert!(matches!(app.screen, Screen::Repos(_)));
         app.handle(key(KeyCode::BackTab))?;
         assert!(matches!(app.screen, Screen::Prs(_)));
         app.writing = true;
@@ -2696,11 +3366,13 @@ mod tests {
     }
 
     #[test]
-    fn settings_groups_project_and_account_without_changing_main_navigation() -> Result<()> {
+    fn settings_opens_over_the_workspace_and_groups_project_and_account() -> Result<()> {
         let (_root, mut app) = fixture()?;
         app.screen = Screen::Prs(vec![]);
         app.handle(key(KeyCode::Char('s')))?;
-        assert!(app.settings_menu.is_none());
+        assert_eq!(app.settings_menu, Some(0));
+        assert!(matches!(app.screen, Screen::Prs(_)));
+        app.handle(key(KeyCode::Esc))?;
         app.screen = Screen::Home;
         app.handle(key(KeyCode::Char('s')))?;
         assert_eq!(app.settings_menu, Some(0));
@@ -2836,7 +3508,10 @@ mod tests {
         app.handle(key(KeyCode::F(6)))?;
         assert_eq!(app.pane_focus, 1);
         app.handle(key(KeyCode::PageDown))?;
-        app.handle(key(KeyCode::Right))?;
+        app.handle(Event::Key(event::KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::SHIFT,
+        )))?;
         let Screen::Watch(viewer) = &app.screen else {
             anyhow::bail!("Expected watch");
         };
@@ -2910,6 +3585,7 @@ mod tests {
         app.handle(key(KeyCode::Esc))?;
         assert_eq!(app.store.load()?, before);
 
+        app.setup_org = Some("different".into());
         app.screen = Screen::Projects(vec![json!({"id":"project-id","name":"New Project"})]);
         app.org = Some("override".into());
         app.project = Some("override-project".into());
@@ -2923,26 +3599,26 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn pr_detail_arrows_switch_tabs_and_scroll_the_selected_content() -> Result<()> {
+    fn pr_detail_brackets_switch_tabs_and_scroll_the_selected_content() -> Result<()> {
         let (_root, mut app) = fixture()?;
         app.screen = Screen::Pr {
             value: json!({"pullRequestId": 7}),
         };
         app.pane_focus = 1;
         app.pane_y = [10, 5, 0];
-        app.handle(key(KeyCode::Right))?;
+        app.handle(key(KeyCode::Char(']')))?;
         assert_eq!(app.pr_tab, 1);
-        assert_eq!(app.pane_focus, 0);
-        assert_eq!(app.pane_y, [0, 5, 0]);
+        assert_eq!(app.pane_focus, 1);
+        assert_eq!(app.pane_y, [10, 0, 0]);
         app.handle(key(KeyCode::Down))?;
-        assert_eq!(app.pane_y[0], 1);
+        assert_eq!(app.pane_y[1], 1);
         app.handle(key(KeyCode::Up))?;
-        assert_eq!(app.pane_y[0], 0);
-        app.handle(key(KeyCode::Left))?;
+        assert_eq!(app.pane_y[1], 0);
+        app.handle(key(KeyCode::Char('[')))?;
         assert_eq!(app.pr_tab, 0);
-        app.handle(key(KeyCode::Left))?;
+        app.handle(key(KeyCode::Char('[')))?;
         assert_eq!(app.pr_tab, 2);
-        app.handle(key(KeyCode::Right))?;
+        app.handle(key(KeyCode::Char(']')))?;
         assert_eq!(app.pr_tab, 0);
         assert_eq!(app.pane_x, [0; 3]);
         app.handle(key(KeyCode::Char(']')))?;
@@ -2970,7 +3646,9 @@ mod tests {
             let Screen::Pr { value } = &app.screen else {
                 anyhow::bail!("Expected PR detail screen")
             };
-            terminal.draw(|frame| render_pr(frame, frame.area(), value, app.pr_tab, 0, [0; 3]))?;
+            terminal.draw(|frame| {
+                render_pr(frame, frame.area(), value, app.pr_tab, 0, [0; 3], [0; 3])
+            })?;
             let rendered = terminal
                 .backend()
                 .buffer()

@@ -109,9 +109,15 @@ jobs:
           \`mise use -g github:$GH_REPO@$VERSION\`
 
           Start setup with \`devops login\`. Enter your organization and a personal access token at the masked prompt; no Entra app registration is required. Entra sign-in remains available with \`--entra\`.
-          PR detail tabs now support Left/Right arrow keys. Up/Down scroll content, and F6 switches pane focus. Changing tabs focuses the content pane and resets its scroll position while preserving the sidebar scroll position. The bracket shortcuts remain available. On-screen hints and the README describe the new controls.
+          Version 0.4.0 adds a GitUI-style TUI with compact numbered tabs, bordered panes, blue selection and command bars, and dialogs over the workspace.
 
-          List repositories with \`devops repo list\`. Rename pipelines with \`devops pipeline rename ID NAME\` and move them with \`devops pipeline move ID FOLDER\`. The TUI places Pipelines first and PRs second, adds e to rename and m to move pipelines, and removes refresh interval labels.
+          - Three sections: Pipelines [1], Pull requests [2], and Repositories [3]. Tab and Shift+Tab cycle sections.
+          - Press w or F6 to change pane focus. Left/Right focuses lists and details; Shift+Left/Right pans. PR detail tabs use [ and ].
+          - Press . to expand contextual commands and h for keyboard help. Settings and project selection open over the current workspace.
+          - Pipeline runs and tasks share the left column while logs fill the right. Escape restores the originating run list and its selection.
+          - Repositories shows the default branch, status, and HTTPS, SSH, and web URLs, with cached selection and F5 refresh.
+          - Compact PR forms support multiline descriptions and comments. Ctrl+S saves; Enter adds a line in multiline fields. Failed submissions retain the draft.
+          - The pipeline editor keeps separate name and folder fields, inline errors, and visible save/cancel controls.
 
           Linux uses a static musl binary, with no glibc requirement. ARM64 and macOS builds are not provided.
           Live tenant authentication acceptance is still required. See the README and docs/acceptance.md.

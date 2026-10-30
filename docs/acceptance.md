@@ -2,6 +2,15 @@
 
 No live Azure DevOps writes have been run by the implementation session. Use an explicitly approved disposable repository, PR, and pipeline for these checks.
 
+## 0.4.0 verification
+
+Local Windows checks cover 104 passing Rust tests, formatting, Clippy, and five
+packaging tests. TUI checks cover all three sections, repository cache scope,
+pane navigation, run-list restoration, modal project selection, multiline forms,
+and rendering at wide and narrow sizes. Captures use test fixture data.
+Live tenant writes and local WSL behavior were not retested for this release.
+The credential-dependent live console test remains ignored.
+
 ## 0.3.9 verification
 
 Windows checks cover 95 passing Rust tests, formatting, Clippy, and five packaging

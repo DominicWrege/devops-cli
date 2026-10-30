@@ -9,7 +9,7 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.3.9
+mise use -g github:DominicWrege/devops-cli@0.4.0
 devops login
 ```
 
@@ -75,20 +75,29 @@ devops tui
 The TUI remembers your selected organization and project and opens directly to
 pull requests on subsequent launches. If you are signed in but have no selected
 project, it opens the project picker without asking for your token again.
-From the main menu, press `s` for Settings, then choose Current project or Account. Project selection
-is remembered for CLI commands too.
+Press `s` in the workspace for Settings, then choose Current project or Account.
+The project picker opens over your current view; `Esc` restores its selection and
+scroll position. Project selection is remembered for CLI commands too.
+
+Numbered tabs, bordered panes, and a blue command bar follow GitUI's layout.
+The focused pane has a brighter border. The footer shows commands for the current
+pane or dialog; `.` expands it, and `h` opens scrollable keyboard help.
 
 | Key | Action |
 | --- | --- |
 | `1` or `l` | Pipelines, starting with recent runs |
 | `2` or `p` | Pull requests |
-| `Tab` / `Shift+Tab` | Switch between pipelines and pull requests outside forms |
+| `3` | Repositories |
+| `Tab` / `Shift+Tab` | Cycle pipelines, pull requests, and repositories outside forms |
 | `i` | Toggle assigned reviews needing attention from the PR list; open them from home |
-| `s` | Settings from the main menu: current project and account |
+| `s` | Settings over the workspace: current project and account |
 | Up/Down, `Enter` | Select and open an item |
-| `F6` | Focus another pane |
+| `w` or `F6` | Focus another visible pane |
 | `PageUp` / `PageDown` | Move through the focused list or scroll the focused pane |
-| Left/Right | Pan long lines and table cells; switch tabs in PR details |
+| Left/Right | Focus the list or detail pane |
+| Shift+Left/Right | Pan long lines and table cells |
+| `[` / `]` | Switch tabs in PR details |
+| `.` / `h` | Expand commands / open keyboard help |
 | `F5` | Refresh lists and details |
 | `Esc` | Cancel a pending read, close a form, or leave the current view |
 | `q` | Quit outside forms |
@@ -99,15 +108,29 @@ animated indicator shows pending requests and elapsed time. `Tab` and `Shift+Tab
 can switch views while reads are loading. Submitted writes wait for server
 confirmation before you can switch views.
 
-Forms use `Tab` to move between fields, `Ctrl+U` to clear a field, and `Enter` to submit.
+Forms use `Tab` / `Shift+Tab` to move between fields and `Ctrl+U` to clear a field.
+`Ctrl+S` submits. `Enter` adds a newline in Description and Comment fields, and
+submits from single-line fields. `Esc` cancels. Failed PR submissions retain the
+draft so you can correct it and retry.
 
 ### Pull requests
 
-Wide terminals show a preview beside the pull request list. `Enter` opens the selected PR.
+Wide terminals show the pull request list and a review summary on the left, with
+a preview on the right. `Enter` opens the selected PR.
 
-PR details show a fixed header, description/comments/status tabs, and a review status sidebar on wide terminals. Use Left/Right arrows to switch detail tabs, `F6` to switch pane focus, and Up/Down or `PgUp`/`PgDn` to scroll. `[` and `]` also switch detail tabs. `Esc` returns to the PR list.
+PR details put identity and review status on the left and description/comments/status
+tabs in a full-height right pane. Narrow terminals show the content beneath a
+compact header. Use `[` / `]` to switch detail tabs, `w` or `F6` to change pane
+focus, and Up/Down or `PgUp`/`PgDn` to scroll. `Esc` returns to the PR list.
 
 In PR details, press `v` to approve or `?` to open the actions menu for commenting, editing, merging, abandoning, reactivating, or creating a PR. The existing action shortcuts still work. To approve an assigned review, press `i` in the PR list, open the PR with `Enter`, then press `v`. Approval, merge, and abandon ask for confirmation. Press `n` in the PR list or details to create a PR.
+
+### Repositories
+
+Press `3` to browse repositories in the current project. Select one with Up/Down;
+its default branch, status, and HTTPS, SSH, and web URLs appear in the details pane.
+`Enter` or Right focuses details; Left returns to the list. Narrow terminals place
+details below the list. `F5` refreshes; switching sections preserves your selection.
 
 ### Pipelines and live logs
 
@@ -126,8 +149,11 @@ folder selected. Use `Tab` to switch fields, `Ctrl+U` to clear, `Enter` to save,
 and `Esc` to cancel. A blank folder or `/` moves to the root. Failed saves retain
 your edits; successful saves update the list and keep the pipeline selected.
 
-In the run viewer, tasks appear on the left and the selected task's logs appear
-on the right. `F6` cycles through tasks, logs, and summary. Up/Down and
+In the run viewer, recent runs and tasks share the left column, with the selected
+task's logs filling the right column. Narrow terminals stack logs below the lists.
+`w` or `F6` cycles through tasks, logs, and runs. Focus the runs pane and press
+`Enter` to inspect another run. `Esc` returns to the original run list with its
+selection preserved. Up/Down and
 `PageUp`/`PageDown` move through tasks or scroll the focused pane. Selecting a task
 or scrolling logs pauses following; `f` resumes it within the selected job.
 Status glyphs show success (✓), failure (✗), running (▶), canceled (■), and skipped (−).
