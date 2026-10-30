@@ -15,6 +15,7 @@ mod auth;
 mod cli;
 mod config;
 mod error;
+mod external;
 mod live;
 mod output;
 mod pipeline;

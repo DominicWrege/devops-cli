@@ -16,6 +16,146 @@ fn contents(buffer: &Buffer) -> String {
     buffer.content.iter().map(|c| c.symbol()).collect()
 }
 
+#[test]
+fn review_tabs_files_and_diffs_remain_usable_at_both_widths() -> Result<()> {
+    let (_root, mut app) = fixture()?;
+    app.screen = Screen::Pr {
+        value: json!({"pullRequestId":7,"status":"active","detailChanges":{
+            "iteration":2,"files":[
+                {"changeType":"edit","item":{"path":"/first.rs"},"diff":"@@ -1 +1 @@\n-old\n+new\n"},
+                {"changeType":"add","item":{"path":"/second.rs"},"diff":"+second"}
+            ]
+        }}),
+    };
+    app.handle(key(KeyCode::F(8)))?;
+    assert_eq!(app.pr_tab, 1);
+    app.handle(key(KeyCode::F(8)))?;
+    assert_eq!(app.pr_tab, 2);
+    app.handle(key(KeyCode::F(8)))?;
+    assert_eq!(app.pr_tab, 3);
+    assert_eq!(app.pane_focus, 0);
+    for width in [70, 120] {
+        app.pane_focus = 0;
+        let buffer = render(&mut app, width, 30)?;
+        let rendered = contents(&buffer);
+        assert!(rendered.contains("F7/F8"));
+        assert!(rendered.contains("first.rs"));
+        assert!(rendered.contains("+new"));
+        assert!(
+            buffer
+                .content
+                .iter()
+                .any(|cell| cell.symbol() == "+" && cell.fg == Color::Green)
+        );
+        app.handle(key(KeyCode::Enter))?;
+        assert_eq!(app.pane_focus, 1);
+        app.handle(key(KeyCode::Down))?;
+        assert_eq!(app.pane_y[1], 1);
+        app.handle(key(KeyCode::Char('w')))?;
+        assert_eq!(app.pane_focus, 0);
+        app.handle(key(KeyCode::Down))?;
+        let Screen::Pr { value } = &app.screen else {
+            anyhow::bail!("Expected PR");
+        };
+        assert_eq!(review::selected(value), 1);
+        assert!(contents(&render(&mut app, width, 30)?).contains("+second"));
+        app.handle(key(KeyCode::Up))?;
+    }
+    app.handle(key(KeyCode::F(8)))?;
+    assert_eq!(app.pr_tab, 0);
+    app.handle(key(KeyCode::Char('d')))?;
+    assert_eq!(app.pr_tab, 3);
+    app.handle(key(KeyCode::Char('v')))?;
+    assert!(matches!(app.confirm, Some(PrCommand::Review { id: 7, .. })));
+    Ok(())
+}
+
+#[test]
+fn diff_replies_stay_with_their_pr_and_file_and_errors_leave_review_available() -> Result<()> {
+    let (_root, mut app) = fixture()?;
+    app.screen = Screen::Pr {
+        value: json!({"pullRequestId":7,"detailChangeIndex":1,
+        "detailChanges":{"files":[{"item":{"path":"/one"}},{"item":{"path":"/two"}}]}}),
+    };
+    app.pr_tab = 3;
+    app.receive((
+        app.generation,
+        Message::PrDiff {
+            id: 7,
+            index: 0,
+            diff: "first file".into(),
+        },
+    ));
+    assert_eq!(app.pane_focus, 0);
+    let Screen::Pr { value } = &app.screen else {
+        anyhow::bail!("Expected PR");
+    };
+    assert_eq!(value["detailChanges"]["files"][0]["diff"], "first file");
+    app.receive((
+        app.generation,
+        Message::PrDiff {
+            id: 8,
+            index: 1,
+            diff: "wrong PR".into(),
+        },
+    ));
+    app.receive((
+        app.generation.wrapping_sub(1),
+        Message::PrDiff {
+            id: 7,
+            index: 1,
+            diff: "stale diff".into(),
+        },
+    ));
+    app.receive((app.generation, Message::Error("Diff unavailable".into())));
+    let Screen::Pr { value } = &app.screen else {
+        anyhow::bail!("Expected PR");
+    };
+    assert!(value["detailChanges"]["files"][1]["diff"].is_null());
+    assert_eq!(review::selected(value), 1);
+    assert_eq!(app.status, "Diff unavailable");
+    app.handle(key(KeyCode::F(7)))?;
+    assert_eq!(app.pr_tab, 2);
+    Ok(())
+}
+
+#[test]
+fn editor_shortcut_works_for_repos_and_prs_and_keeps_invalid_path_for_retry() -> Result<()> {
+    let (_root, mut app) = fixture()?;
+    let repo = json!({"name":"demo","id":"repo"});
+    let pr = json!({"pullRequestId":7,"repository":repo});
+    for screen in [
+        Screen::Repos(vec![repo.clone()]),
+        Screen::Prs(vec![pr.clone()]),
+        Screen::Pr { value: pr },
+    ] {
+        app.set_screen(screen);
+        let hints = command_hints(&app);
+        assert!(
+            hints
+                .iter()
+                .any(|(hint, enabled)| hint == "Browser [b]" && *enabled)
+        );
+        app.handle(key(KeyCode::Char('o')))?;
+        let form = app.form.as_mut().context("Editor form")?;
+        assert!(matches!(form.kind, FormKind::OpenEditor(_)));
+        form.fields[0].value = app
+            .store
+            .root
+            .join("missing-checkout")
+            .display()
+            .to_string();
+        assert!(app.submit().is_err());
+        assert!(app.form.is_some());
+        app.handle(key(KeyCode::Esc))?;
+        assert!(app.form.is_none());
+    }
+    app.set_screen(Screen::Repos(vec![]));
+    assert!(app.handle(key(KeyCode::Char('b'))).is_err());
+    assert!(app.handle(key(KeyCode::Char('o'))).is_err());
+    Ok(())
+}
+
 #[tokio::test]
 async fn three_sections_cycle_in_order_and_number_keys_switch_during_reads() -> Result<()> {
     let (_root, mut app) = fixture()?;

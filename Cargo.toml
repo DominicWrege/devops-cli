@@ -1,6 +1,6 @@
 [package]
 name = "devops"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.88"
 description = "Azure DevOps CLI and TUI"
@@ -30,6 +30,8 @@ percent-encoding = "2"
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", features = ["sink"] }
 cli-table = { version = "0.5", default-features = false }
+similar = "2.7"
+open = "5.3"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Foundation", "Foundation_Collections", "Security_Authentication_Web_Core", "Security_Credentials", "Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Com", "Win32_System_WinRT", "Win32_UI_WindowsAndMessaging", "Win32_System_Console"] }

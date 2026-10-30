@@ -9,7 +9,7 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.4.0
+mise use -g github:DominicWrege/devops-cli@0.4.1
 devops login
 ```
 
@@ -96,7 +96,9 @@ pane or dialog; `.` expands it, and `h` opens scrollable keyboard help.
 | `PageUp` / `PageDown` | Move through the focused list or scroll the focused pane |
 | Left/Right | Focus the list or detail pane |
 | Shift+Left/Right | Pan long lines and table cells |
-| `[` / `]` | Switch tabs in PR details |
+| `F7` / `F8` or `[` / `]` | Previous / next tab in PR details |
+| `d` | Open changed files in PR details; select a file and press `Enter` for its diff |
+| `b` / `o` | Open the selected repository or PR in the browser / its local checkout in an editor |
 | `.` / `h` | Expand commands / open keyboard help |
 | `F5` | Refresh lists and details |
 | `Esc` | Cancel a pending read, close a form, or leave the current view |
@@ -118,12 +120,30 @@ draft so you can correct it and retry.
 Wide terminals show the pull request list and a review summary on the left, with
 a preview on the right. `Enter` opens the selected PR.
 
-PR details put identity and review status on the left and description/comments/status
+PR details put identity and review status on the left and description/comments/status/files
 tabs in a full-height right pane. Narrow terminals show the content beneath a
-compact header. Use `[` / `]` to switch detail tabs, `w` or `F6` to change pane
+compact header. Use `F7` / `F8` (or `[` / `]`) to switch detail tabs, `w` or `F6` to change pane
 focus, and Up/Down or `PgUp`/`PgDn` to scroll. `Esc` returns to the PR list.
 
+Press `d` for changed files. Select a file with Up/Down, then press `Enter` to load
+its unified diff. Additions are green and deletions red. `w` or `F6` switches
+between files and the diff; scroll with Up/Down or `PgUp`/`PgDn` and pan long diff
+lines with Shift+Left/Right. Narrow terminals stack the file list above the diff.
+Files compare the latest PR iteration with its merge base. Diffs use that
+iteration's fixed commits and are cached until `F5` refreshes the PR. Binary
+files, submodules, and text over 1 MiB per side show a message directing you to
+the browser. No local checkout is needed for the TUI diff.
+
 In PR details, press `v` to approve or `?` to open the actions menu for commenting, editing, merging, abandoning, reactivating, or creating a PR. The existing action shortcuts still work. To approve an assigned review, press `i` in the PR list, open the PR with `Enter`, then press `v`. Approval, merge, and abandon ask for confirmation. Press `n` in the PR list or details to create a PR.
+
+Approval and assigned reviews look up your identity within the selected
+organization and support PAT authentication. Voting requires a PAT with
+**Code: Read & write** and the corresponding repository permissions.
+
+From the PR list or details, `b` opens the PR in your default browser, where you
+can review changes and comments in Azure DevOps. `o` opens a form for an existing
+local checkout directory and a GUI editor executable. It opens that checkout's
+current branch; it does not clone, fetch, or switch to the PR branch.
 
 ### Repositories
 
@@ -131,6 +151,16 @@ Press `3` to browse repositories in the current project. Select one with Up/Down
 its default branch, status, and HTTPS, SSH, and web URLs appear in the details pane.
 `Enter` or Right focuses details; Left returns to the list. Narrow terminals place
 details below the list. `F5` refreshes; switching sections preserves your selection.
+
+Press `b` to open the selected repository in your default browser, or `o` to open
+an existing checkout in your editor. The editor form accepts an executable name
+such as `code` or `cursor`, or its full path, without command-line arguments or
+surrounding quotes. Git must be installed to resolve the checkout root. Choose
+the directory belonging to the selected repository; the CLI does not match Git
+remotes automatically. The directory and editor are remembered in
+`~/.config/devops/editor.json`. `DEVOPS_EDITOR` overrides the default executable;
+otherwise it uses the saved choice, or `code` initially. Use a GUI editor because
+the TUI keeps control of the terminal.
 
 ### Pipelines and live logs
 

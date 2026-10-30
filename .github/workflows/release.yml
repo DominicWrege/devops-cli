@@ -109,15 +109,17 @@ jobs:
           \`mise use -g github:$GH_REPO@$VERSION\`
 
           Start setup with \`devops login\`. Enter your organization and a personal access token at the masked prompt; no Entra app registration is required. Entra sign-in remains available with \`--entra\`.
-          Version 0.4.0 adds a GitUI-style TUI with compact numbered tabs, bordered panes, blue selection and command bars, and dialogs over the workspace.
+          Version 0.4.1 adds PR file review and browser/editor shortcuts, and fixes the identity lookup used by PAT approval.
 
-          - Three sections: Pipelines [1], Pull requests [2], and Repositories [3]. Tab and Shift+Tab cycle sections.
-          - Press w or F6 to change pane focus. Left/Right focuses lists and details; Shift+Left/Right pans. PR detail tabs use [ and ].
-          - Press . to expand contextual commands and h for keyboard help. Settings and project selection open over the current workspace.
-          - Pipeline runs and tasks share the left column while logs fill the right. Escape restores the originating run list and its selection.
-          - Repositories shows the default branch, status, and HTTPS, SSH, and web URLs, with cached selection and F5 refresh.
-          - Compact PR forms support multiline descriptions and comments. Ctrl+S saves; Enter adds a line in multiline fields. Failed submissions retain the draft.
-          - The pipeline editor keeps separate name and folder fields, inline errors, and visible save/cancel controls.
+          - Approval and assigned reviews use the selected organization's authenticated-user identity instead of the global Profiles API, which can reject PATs.
+          - Press d in PR details for changed files, then Enter to load a unified diff. Diffs compare fixed commits from the latest PR iteration against its merge base.
+          - F7/F8 switches Description, Comments, Status, and Files. The existing [ and ] shortcuts still work, with clearer tab hints.
+          - Press b on a repository or PR to open it in the default browser.
+          - Press o to open an existing checkout in a GUI editor. The directory and executable are remembered; the current branch is preserved.
+          - Up/Down and PageUp/PageDown navigation hints are hidden for a simpler command bar. The keys still work.
+
+          Text diffs are limited to 1 MiB per side. Binary files and submodules direct you to the browser.
+          Live tenant approval, live diff responses, and desktop browser/editor handoff remain unverified; mock API and TUI tests cover these changes.
 
           Linux uses a static musl binary, with no glibc requirement. ARM64 and macOS builds are not provided.
           Live tenant authentication acceptance is still required. See the README and docs/acceptance.md.

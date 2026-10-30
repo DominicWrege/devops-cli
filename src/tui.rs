@@ -33,6 +33,7 @@ use tokio::{sync::mpsc, task::JoinHandle};
 mod chrome;
 #[cfg(test)]
 mod interaction_tests;
+mod review;
 use chrome::{command_rows, draw_commands, draw_header, pane_block, popup, selection_style};
 
 type Terminal = ratatui::Terminal<CrosstermBackend<io::Stdout>>;
@@ -84,6 +85,15 @@ enum Message {
     Pr {
         value: Value,
     },
+    PrChanges {
+        id: i32,
+        changes: Value,
+    },
+    PrDiff {
+        id: i32,
+        index: usize,
+        diff: String,
+    },
     Pipelines(Vec<Value>),
     Recent(Vec<Value>),
     Runs {
@@ -110,6 +120,7 @@ enum Message {
 }
 
 enum FormKind {
+    OpenEditor(String),
     PipelineEdit(i32),
     Identity,
     PatIdentity,
@@ -213,7 +224,10 @@ impl Form {
                     .map_err(|e| anyhow::anyhow!(e))?,
                 yes: true,
             },
-            FormKind::PipelineEdit(_) | FormKind::Identity | FormKind::PatIdentity => {
+            FormKind::OpenEditor(_)
+            | FormKind::PipelineEdit(_)
+            | FormKind::Identity
+            | FormKind::PatIdentity => {
                 anyhow::bail!("Not a PR action")
             }
         })
@@ -712,6 +726,107 @@ impl App {
         });
         Ok(())
     }
+    fn load_changes(&mut self) -> Result<()> {
+        let Screen::Pr { value } = &self.screen else {
+            return Ok(());
+        };
+        if !value["detailChanges"].is_null() {
+            return Ok(());
+        }
+        let id = response_id(value, "pullRequestId")?;
+        let pr = value.clone();
+        let api = self.api()?;
+        self.launch(async move {
+            Ok(Message::PrChanges {
+                id,
+                changes: api.pr_changes(&pr).await?,
+            })
+        });
+        self.loading_label = "Loading changed files";
+        Ok(())
+    }
+    fn load_diff(&mut self) -> Result<()> {
+        let Screen::Pr { value } = &self.screen else {
+            return Ok(());
+        };
+        let index = review::selected(value);
+        let changes = &value["detailChanges"];
+        let Some(file) = changes["files"].get(index) else {
+            return Ok(());
+        };
+        if !file["diff"].is_null() {
+            self.pane_focus = 1;
+            return Ok(());
+        }
+        let id = response_id(value, "pullRequestId")?;
+        let changes = changes.clone();
+        let api = self.api()?;
+        self.launch(async move {
+            Ok(Message::PrDiff {
+                id,
+                index,
+                diff: api.pr_file_diff(&changes, index).await?,
+            })
+        });
+        self.loading_label = "Loading file diff";
+        Ok(())
+    }
+    fn external_selection(&self) -> Result<(&Value, bool)> {
+        match &self.screen {
+            Screen::Pr { value } => Ok((value, true)),
+            Screen::Prs(items) => Ok((
+                items
+                    .get(self.selection.selected().unwrap_or(0))
+                    .context("No pull request selected")?,
+                true,
+            )),
+            Screen::Repos(items) => Ok((
+                items
+                    .get(self.selection.selected().unwrap_or(0))
+                    .context("No repository selected")?,
+                false,
+            )),
+            _ => anyhow::bail!("Select a repository or pull request first"),
+        }
+    }
+    fn open_external(&mut self, editor: bool) -> Result<()> {
+        let (value, is_pr) = self.external_selection()?;
+        let target = self
+            .settings
+            .target(self.org.as_deref(), self.project.as_deref())?;
+        let repo = if is_pr { &value["repository"] } else { value };
+        let repo_url = crate::external::repo_url(&target, repo)?;
+        if editor {
+            let settings = crate::external::EditorSettings::load(&self.store)?;
+            let path = settings
+                .checkouts
+                .get(&repo_url)
+                .cloned()
+                .unwrap_or(std::env::current_dir()?);
+            let name = text(repo, "name").to_owned();
+            self.form = Some(Form::new(
+                FormKind::OpenEditor(repo_url),
+                vec![
+                    ("Local checkout directory", path.display().to_string()),
+                    (
+                        "GUI editor executable (no arguments)",
+                        settings.executable(),
+                    ),
+                ],
+            ));
+            self.status =
+                format!("Choose the existing checkout for {name}. Opens its current branch.");
+        } else {
+            let url = if is_pr {
+                crate::external::pr_url(&target, value)?
+            } else {
+                repo_url
+            };
+            crate::external::browse(&url)?;
+            self.status = format!("Opened {url}");
+        }
+        Ok(())
+    }
     fn execute_pr(&mut self, command: PrCommand) -> Result<()> {
         let api = self.api()?;
         self.launch(async move { Ok(Message::Written(api.pr_action(&command).await?)) });
@@ -864,6 +979,31 @@ impl App {
                     self.set_screen(Screen::Pr { value });
                     self.pane_focus = usize::from(self.viewport.width >= 90);
                 }
+                if self.pr_tab == 3
+                    && let Err(error) = self.load_changes()
+                {
+                    self.status = error.to_string();
+                }
+            }
+            Message::PrChanges { id, changes } => {
+                if let Screen::Pr { value } = &mut self.screen
+                    && value["pullRequestId"] == id
+                {
+                    value["detailChanges"] = changes;
+                    value["detailChangeIndex"] = serde_json::json!(0);
+                }
+            }
+            Message::PrDiff { id, index, diff } => {
+                if let Screen::Pr { value } = &mut self.screen
+                    && value["pullRequestId"] == id
+                    && let Some(file) = value["detailChanges"]["files"].get_mut(index)
+                {
+                    file["diff"] = serde_json::json!(diff);
+                    if review::selected(value) == index && self.pr_tab == 3 {
+                        self.pane_focus = 1;
+                        self.pane_y[1] = 0;
+                    }
+                }
             }
             Message::Pipelines(mut items) => {
                 sort_pipelines(&mut items);
@@ -938,6 +1078,20 @@ impl App {
     }
     fn submit(&mut self) -> Result<()> {
         let form = self.form.as_ref().context("No form")?;
+        if let FormKind::OpenEditor(repo_key) = &form.kind {
+            let root = crate::external::open_editor(
+                &self.store,
+                repo_key,
+                std::path::Path::new(form.value(0)?),
+                form.value(1)?,
+            )?;
+            self.form = None;
+            self.status = format!(
+                "Opened checkout {} in editor (current branch)",
+                root.display()
+            );
+            return Ok(());
+        }
         if matches!(form.kind, FormKind::PatIdentity) {
             let organization = crate::config::organization(form.value(0)?)?;
             let entered = form.value(1)?;
@@ -1217,6 +1371,10 @@ impl App {
                     self.pr_actions = false;
                     self.open_pr_form(action)?;
                 }
+                KeyCode::Char(action @ ('b' | 'o')) => {
+                    self.pr_actions = false;
+                    self.open_external(action == 'o')?;
+                }
                 _ => (),
             }
             return Ok(false);
@@ -1313,16 +1471,49 @@ impl App {
             return Ok(false);
         }
         if matches!(key.code, KeyCode::F(6) | KeyCode::Char('w')) {
-            let panes = pane_count(&self.screen, self.viewport);
+            let panes = pane_count(&self.screen, self.viewport, self.pr_tab);
             self.pane_focus = (self.pane_focus + 1) % panes;
             return Ok(false);
         }
         if matches!(self.screen, Screen::Pr { .. }) {
+            if self.pr_tab == 3
+                && self.pane_focus == 0
+                && let Screen::Pr { value } = &mut self.screen
+            {
+                let index = review::selected(value);
+                let count = pr_rows(&value["detailChanges"]["files"]).len();
+                let step = if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+                    20
+                } else {
+                    1
+                };
+                let selected = match key.code {
+                    KeyCode::Up | KeyCode::Char('k') | KeyCode::PageUp => {
+                        Some(index.saturating_sub(step))
+                    }
+                    KeyCode::Down | KeyCode::Char('j') | KeyCode::PageDown => {
+                        Some(index.saturating_add(step).min(count.saturating_sub(1)))
+                    }
+                    KeyCode::Home => Some(0),
+                    _ => None,
+                };
+                if let Some(selected) = selected {
+                    value["detailChangeIndex"] = serde_json::json!(selected);
+                    self.pane_y[1] = 0;
+                    return Ok(false);
+                }
+            }
             match key.code {
-                KeyCode::Char('[' | ']') => {
-                    let next = key.code == KeyCode::Char(']');
-                    self.pr_tab = (self.pr_tab + if next { 1 } else { 2 }) % 3;
+                KeyCode::Char('[' | ']') | KeyCode::F(7) | KeyCode::F(8) => {
+                    let next = matches!(key.code, KeyCode::Char(']') | KeyCode::F(8));
+                    self.pr_tab = (self.pr_tab + if next { 1 } else { 3 }) % 4;
                     self.pane_focus = usize::from(self.viewport.width >= 90);
+                    if self.pr_tab == 3 {
+                        self.pane_focus = 0;
+                        if self.task.is_none() && !self.writing {
+                            self.load_changes()?;
+                        }
+                    }
                     self.pane_y[self.pane_focus] = 0;
                     return Ok(false);
                 }
@@ -1350,7 +1541,7 @@ impl App {
                 self.pane_focus = if key.code == KeyCode::Left {
                     0
                 } else {
-                    1.min(pane_count(&self.screen, self.viewport) - 1)
+                    1.min(pane_count(&self.screen, self.viewport, self.pr_tab) - 1)
                 };
                 return Ok(false);
             }
@@ -1564,6 +1755,22 @@ impl App {
             return Ok(false);
         }
         match key.code {
+            KeyCode::Char(action @ ('b' | 'o'))
+                if matches!(
+                    self.screen,
+                    Screen::Prs(_) | Screen::Pr { .. } | Screen::Repos(_)
+                ) =>
+            {
+                self.open_external(action == 'o')?;
+            }
+            KeyCode::Char('d') if matches!(self.screen, Screen::Pr { .. }) => {
+                self.pr_tab = 3;
+                self.pane_focus = 0;
+                self.load_changes()?;
+            }
+            KeyCode::Enter if matches!(self.screen, Screen::Pr { .. }) && self.pr_tab == 3 => {
+                self.load_diff()?;
+            }
             KeyCode::Char('r')
                 if matches!(self.screen, Screen::Pipelines(_) | Screen::Recent(_)) =>
             {
@@ -1750,6 +1957,10 @@ fn render_pr(
     scroll: [u16; 3],
     horizontal: [u16; 3],
 ) {
+    if tab == 3 {
+        review::render(frame, area, pr, focus, scroll, horizontal);
+        return;
+    }
     let wide = area.width >= 90;
     let columns =
         Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(area);
@@ -1845,9 +2056,9 @@ fn render_pr(
         })),
     };
     let title = match tab {
-        1 => "Description | [Comments] | Status",
-        2 => "Description | Comments | [Status]",
-        _ => "[Description] | Comments | Status",
+        1 => "F7/F8: Description | [Comments] | Status | Files",
+        2 => "F7/F8: Description | Comments | [Status] | Files",
+        _ => "F7/F8: [Description] | Comments | Status | Files",
     };
     frame.render_widget(
         Paragraph::new(body)
@@ -1881,10 +2092,11 @@ fn section_index(screen: &Screen) -> Option<usize> {
     }
 }
 
-fn pane_count(screen: &Screen, area: Rect) -> usize {
+fn pane_count(screen: &Screen, area: Rect, pr_tab: usize) -> usize {
     match screen {
         Screen::Watch(_) => 3,
         Screen::Pipelines(_) | Screen::Repos(_) => 2,
+        Screen::Pr { .. } if pr_tab == 3 => 2,
         Screen::Prs(_) | Screen::Pr { .. } if area.width >= 90 => 2,
         _ => 1,
     }
@@ -1892,7 +2104,7 @@ fn pane_count(screen: &Screen, area: Rect) -> usize {
 
 fn command_hints(app: &App) -> Vec<(String, bool)> {
     let hints: &[&str] = if app.help_scroll.is_some() {
-        &["Scroll [↑↓]", "Page [PgUp/PgDn]", "Close [Esc]"]
+        &["Close [Esc]"]
     } else if app.confirm.is_some() {
         &["Confirm [y]", "Cancel [n/Esc]"]
     } else if let Some(form) = &app.form {
@@ -1913,10 +2125,12 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
             ]
         }
     } else if app.settings_menu.is_some() {
-        &["Select [↑↓]", "Open [Enter]", "Close [Esc]"]
+        &["Open [Enter]", "Close [Esc]"]
     } else if app.pr_actions {
         &[
             "Approve [v]",
+            "Browser [b]",
+            "Editor [o]",
             "Comment [c]",
             "Edit [e]",
             "Merge [m]",
@@ -1934,33 +2148,52 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
                 "Settings [s]",
                 "Assigned [i]",
             ],
-            Screen::Organizations(_) | Screen::Projects(_) => {
-                &["Select [↑↓]", "Use [Enter]", "Cancel [Esc]"]
-            }
+            Screen::Organizations(_) | Screen::Projects(_) => &["Use [Enter]", "Cancel [Esc]"],
             Screen::Prs(_) if app.pane_focus == 0 => &[
                 "Open [Enter]",
+                "Browser [b]",
+                "Editor [o]",
                 "New [n]",
                 "Assigned [i]",
                 "Detail [→]",
                 "Refresh [F5]",
             ],
-            Screen::Repos(_) if app.pane_focus == 0 => {
-                &["Details [Enter]", "Detail pane [→]", "Refresh [F5]"]
-            }
-            Screen::Repos(_) => &["Scroll [↑↓]", "List [←]", "Refresh [F5]"],
+            Screen::Repos(_) if app.pane_focus == 0 => &[
+                "Browser [b]",
+                "Editor [o]",
+                "Details [Enter]",
+                "Detail pane [→]",
+                "Refresh [F5]",
+            ],
+            Screen::Repos(_) => &["Browser [b]", "Editor [o]", "List [←]", "Refresh [F5]"],
             Screen::Prs(_) => &[
-                "Scroll [↑↓]",
                 "Open [Enter]",
+                "Browser [b]",
+                "Editor [o]",
                 "List [←]",
                 "New [n]",
                 "Assigned [i]",
                 "Refresh [F5]",
             ],
-            Screen::Pr { .. } => &[
+            Screen::Pr { .. } if app.pr_tab == 3 => &[
+                "Diff [Enter]",
+                "Files/Diff [w]",
+                "Tabs [F7/F8]",
                 "Approve [v]",
+                "Browser [b]",
+                "Editor [o]",
+                "Actions [?]",
+                "Back [Esc]",
+                "Refresh [F5]",
+            ],
+            Screen::Pr { .. } => &[
+                "Tabs [F7/F8]",
+                "Files [d]",
+                "Approve [v]",
+                "Browser [b]",
+                "Editor [o]",
                 "Actions [?]",
                 "Tabs [ / ]",
-                "Scroll [↑↓]",
                 "Back [Esc]",
                 "Refresh [F5]",
             ],
@@ -1974,12 +2207,10 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
             Screen::Recent(_) => &["Open [Enter]", "All pipelines [a]", "Refresh [F5]"],
             Screen::Runs { .. } => &["Open [Enter]", "Back [Esc]", "Refresh [F5]"],
             Screen::Watch(_) if app.pane_focus == 2 && app.run_list.is_some() => {
-                &["Select run [↑↓]", "Open [Enter]", "Back [Esc]"]
+                &["Open [Enter]", "Back [Esc]"]
             }
-            Screen::Watch(_) if app.pane_focus == 0 => {
-                &["Task [↑↓]", "Logs [→]", "Follow [f]", "Back [Esc]"]
-            }
-            Screen::Watch(_) => &["Scroll [↑↓]", "Follow [f]", "Tasks [←]", "Back [Esc]"],
+            Screen::Watch(_) if app.pane_focus == 0 => &["Logs [→]", "Follow [f]", "Back [Esc]"],
+            Screen::Watch(_) => &["Follow [f]", "Tasks [←]", "Back [Esc]"],
         }
     };
     let empty = match &app.screen {
@@ -2000,7 +2231,11 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
                     && *hint == "Approve [v]")
                 && !(app.form.is_none()
                     && empty
-                    && (hint.contains("[Enter]") || hint.contains("[e]") || hint.contains("[m]")));
+                    && (hint.contains("[Enter]")
+                        || hint.contains("[e]")
+                        || hint.contains("[m]")
+                        || hint.contains("[b]")
+                        || hint.contains("[o]")));
             (hint.to_string(), enabled)
         })
         .collect();
@@ -2020,8 +2255,6 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
         result.extend(
             [
                 "Pane [w/F6]",
-                "Nav [↑↓/jk]",
-                "Page [PgUp/PgDn]",
                 "Pan [Shift+←→]",
                 "Sections [Tab/1/2/3]",
                 "Settings [s]",
@@ -2083,6 +2316,7 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &Form, status: &str) {
         lines.push(Line::raw(output::cell(status)));
     }
     let title = match form.kind {
+        FormKind::OpenEditor(_) => "Open existing checkout in editor",
         FormKind::PipelineEdit(_) => "Edit pipeline",
         FormKind::Identity | FormKind::PatIdentity => "Sign in and setup",
         FormKind::Create => "Create pull request",
@@ -2122,7 +2356,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
     };
     let area = frame.area();
     app.viewport = area;
-    app.pane_focus = app.pane_focus.min(pane_count(&app.screen, area) - 1);
+    app.pane_focus = app
+        .pane_focus
+        .min(pane_count(&app.screen, area, app.pr_tab) - 1);
     frame.render_widget(
         Block::default().style(Style::default().fg(Color::Gray).bg(Color::Black)),
         area,
@@ -2180,10 +2416,10 @@ fn draw(frame: &mut Frame, app: &mut App) {
         }
     }
     if app.pr_actions {
-        let popup = popup(area, 45, 12);
+        let popup = popup(area, 45, 14);
         frame.render_widget(Clear, popup);
         frame.render_widget(
-            Paragraph::new("v  Approve\nc  Comment\ne  Edit\nm  Merge\na  Abandon\nr  Reactivate\nn  Create a PR\n\nPress an action key. Esc to close.")
+            Paragraph::new("v  Approve\nb  Open in browser\no  Open checkout in editor\nc  Comment\ne  Edit\nm  Merge\na  Abandon\nr  Reactivate\nn  Create a PR\n\nPress an action key. Esc to close.")
                 .block(pane_block("PR actions", true)),
             popup,
         );
@@ -3602,7 +3838,7 @@ mod tests {
     fn pr_detail_brackets_switch_tabs_and_scroll_the_selected_content() -> Result<()> {
         let (_root, mut app) = fixture()?;
         app.screen = Screen::Pr {
-            value: json!({"pullRequestId": 7}),
+            value: json!({"pullRequestId": 7, "detailChanges":{"files":[]}}),
         };
         app.pane_focus = 1;
         app.pane_y = [10, 5, 0];
@@ -3617,7 +3853,7 @@ mod tests {
         app.handle(key(KeyCode::Char('[')))?;
         assert_eq!(app.pr_tab, 0);
         app.handle(key(KeyCode::Char('[')))?;
-        assert_eq!(app.pr_tab, 2);
+        assert_eq!(app.pr_tab, 3);
         app.handle(key(KeyCode::Char(']')))?;
         assert_eq!(app.pr_tab, 0);
         assert_eq!(app.pane_x, [0; 3]);
