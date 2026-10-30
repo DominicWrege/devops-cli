@@ -2,6 +2,19 @@
 
 No live Azure DevOps writes have been run by the implementation session. Use an explicitly approved disposable repository, PR, and pipeline for these checks.
 
+## 0.4.1 verification
+
+Local Windows verification covers 115 passing Rust tests, formatting, Clippy,
+and five packaging tests. Mock API checks cover PAT votes without the global
+Profiles API, assigned reviews, fixed-commit diffs, paginated changed files,
+renames, deletions, binary files, and oversized content. TUI tests cover F7/F8
+navigation, file selection and diff scrolling at both widths, stale replies,
+and editor forms that retain invalid paths for correction.
+
+Live tenant voting, live diff responses, browser/editor handoff, and Linux/WSL
+desktop integration still require manual verification. The live console test
+remains ignored. No approval was submitted to a real PR.
+
 ## 0.4.0 verification
 
 Local Windows checks cover 104 passing Rust tests, formatting, Clippy, and five

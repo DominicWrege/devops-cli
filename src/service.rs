@@ -42,6 +42,8 @@ fn decode(response: RawResponse) -> Result<Value> {
 pub fn segment(value: &str) -> String {
     utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
 }
+
+mod review;
 pub fn branch(value: &str) -> String {
     if value.starts_with("refs/") {
         value.into()
@@ -88,6 +90,35 @@ impl Policy for SdkPath {
         request.url_mut().set_path(&path);
         // API clients must receive authentication errors, not browser sign-in redirects.
         request.insert_header("x-tfs-fedauthredirect", "Suppress");
+        next_policy(ctx, request, next).await
+    }
+}
+
+// The generated SDK has no connectionData builder. Reuse its authenticated GET
+// pipeline and raw response handling with a route override scoped to this call.
+#[derive(Debug)]
+struct SdkConnectionData;
+#[async_trait::async_trait]
+impl Policy for SdkConnectionData {
+    async fn send(
+        &self,
+        ctx: &HttpContext,
+        request: &mut Request,
+        next: &[Arc<dyn Policy>],
+    ) -> PolicyResult {
+        let path = request
+            .url()
+            .path()
+            .trim_end_matches("/_apis/projects")
+            .to_owned();
+        request
+            .url_mut()
+            .set_path(&format!("{path}/_apis/connectionData"));
+        request
+            .url_mut()
+            .query_pairs_mut()
+            .clear()
+            .append_pair("api-version", "7.1-preview.1");
         next_policy(ctx, request, next).await
     }
 }
@@ -160,6 +191,24 @@ impl Service {
         segment(&self.target.project)
     }
 
+    /// Organization-scoped identity works with PATs; the global Profiles API requires Entra.
+    pub async fn current_user_id(&self) -> Result<String> {
+        let mut policies = policies(None);
+        policies.push(Arc::new(SdkConnectionData));
+        let value = call!(
+            ado::core::ClientBuilder::new(self.credential.clone())
+                .endpoint(self.endpoint.clone())
+                .retry(RetryOptions::none())
+                .per_call_policies(policies)
+                .build()
+                .projects_client()
+                .list(self.org())
+        )?;
+        let id = uuid::Uuid::parse_str(text(&value["authenticatedUser"], "id"))
+            .context("Azure DevOps returned no valid authenticated user ID")?;
+        ensure!(!id.is_nil(), "Azure DevOps returned an anonymous user");
+        Ok(id.to_string())
+    }
     pub async fn profile(&self) -> Result<Value> {
         call!(
             ado::profile::ClientBuilder::new(self.credential.clone())
@@ -340,17 +389,15 @@ impl Service {
             .context("PR response has no repository ID")
     }
     pub async fn attention_prs(&self) -> Result<Vec<Value>> {
-        let me = self.profile().await?;
-        let me = text(&me, "id");
-        ensure!(!me.is_empty(), "Profile has no ID");
+        let me = self.current_user_id().await?;
         Ok(self
-            .pr_list(PrState::Active, None, Some(me), None)
+            .pr_list(PrState::Active, None, Some(&me), None)
             .await?
             .into_iter()
             .filter(|pr| {
                 pr["isDraft"] != true
                     && rows(&pr["reviewers"]).iter().any(|r| {
-                        text(r, "id").eq_ignore_ascii_case(me)
+                        text(r, "id").eq_ignore_ascii_case(&me)
                             && r["vote"].as_i64().unwrap_or(0) <= 0
                     })
             })
@@ -587,9 +634,7 @@ impl Service {
             }
             PrCommand::Review { id, vote } => {
                 let pr = self.pr(*id).await?;
-                let me = self.profile().await?;
-                let id_me = text(&me, "id");
-                ensure!(!id_me.is_empty(), "Profile has no ID");
+                let id_me = self.current_user_id().await?;
                 let reviewer: git::IdentityRefWithVote =
                     serde_json::from_value(json!({"id": id_me, "vote":vote.number()}))?;
                 call!(
@@ -600,7 +645,7 @@ impl Service {
                             reviewer,
                             Self::repo_id(&pr)?,
                             *id,
-                            segment(id_me),
+                            segment(&id_me),
                             self.project()
                         )
                 )?;
@@ -1110,6 +1155,250 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(value))
             .mount(server)
             .await;
+    }
+    #[tokio::test]
+    async fn pat_review_uses_organization_identity_and_sends_each_vote() -> Result<()> {
+        let server = MockServer::start().await;
+        let mut api = api(&server)?;
+        api.credential = ado::Credential::from_pat("fixture-pat");
+        let me = "11111111-1111-1111-1111-111111111111";
+        mock_get(
+            &server,
+            "/org/project/_apis/git/pullrequests/7",
+            json!({"pullRequestId":7,"repository":{"id":"repo"}}),
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/org/_apis/connectionData"))
+            .and(header("authorization", "Basic OmZpeHR1cmUtcGF0"))
+            .and(header("x-tfs-fedauthredirect", "Suppress"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"authenticatedUser":{"id":me}})),
+            )
+            .expect(5)
+            .mount(&server)
+            .await;
+        Mock::given(path("/_apis/profile/profiles/me"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(0)
+            .mount(&server)
+            .await;
+        for vote in [
+            Vote::Approve,
+            Vote::ApproveWithSuggestions,
+            Vote::Wait,
+            Vote::Reject,
+            Vote::Reset,
+        ] {
+            Mock::given(method("PUT"))
+                .and(path(format!(
+                    "/org/project/_apis/git/repositories/repo/pullRequests/7/reviewers/{}",
+                    segment(me)
+                )))
+                .and(wiremock::matchers::body_partial_json(
+                    json!({"id":me,"vote":vote.number()}),
+                ))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"id":me,"vote":vote.number()})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            assert!(
+                api.pr_action(&PrCommand::Review { id: 7, vote })
+                    .await?
+                    .contains("Recorded review")
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn assigned_reviews_use_org_identity_and_filter_drafts_and_positive_votes() -> Result<()>
+    {
+        let server = MockServer::start().await;
+        let me = "11111111-1111-1111-1111-111111111111";
+        mock_get(
+            &server,
+            "/org/_apis/connectionData",
+            json!({"authenticatedUser":{"id":me}}),
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/org/project/_apis/git/pullrequests"))
+            .and(query_param("searchCriteria.reviewerId", me))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[
+                {"pullRequestId":1,"reviewers":[{"id":me,"vote":0}]},
+                {"pullRequestId":2,"isDraft":true,"reviewers":[{"id":me,"vote":0}]},
+                {"pullRequestId":3,"reviewers":[{"id":me,"vote":10}]},
+                {"pullRequestId":4,"reviewers":[{"id":me,"vote":-5}]}
+            ]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let prs = api(&server)?.attention_prs().await?;
+        assert_eq!(
+            prs.iter()
+                .map(|p| p["pullRequestId"].as_i64())
+                .collect::<Vec<_>>(),
+            vec![Some(1), Some(4)]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn identity_errors_preserve_auth_codes_without_response_secrets() -> Result<()> {
+        for status in [401, 403, 302] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/org/_apis/connectionData"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_string("private-response")
+                        .insert_header("location", "https://example.invalid/secret"),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let error = api(&server)?
+                .current_user_id()
+                .await
+                .err()
+                .context("Expected identity error")?;
+            assert!(!error.to_string().contains("private-response"));
+            if status != 302 {
+                assert_eq!(
+                    error
+                        .downcast_ref::<error::Failure>()
+                        .context("Expected stable failure")?
+                        .code,
+                    if status == 401 { 3 } else { 4 }
+                );
+            }
+        }
+        let server = MockServer::start().await;
+        mock_get(
+            &server,
+            "/org/_apis/connectionData",
+            json!({"authenticatedUser":{"id":"not-an-id"}}),
+        )
+        .await;
+        assert!(api(&server)?.current_user_id().await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn review_files_page_against_the_latest_iterations_merge_base() -> Result<()> {
+        let server = MockServer::start().await;
+        mock_get(&server, "/org/project/_apis/git/repositories/repo/pullRequests/7/iterations",
+            json!({"value":[{"id":2,"commonRefCommit":{"commitId":"base"},"sourceRefCommit":{"commitId":"head"}},{"id":1}]})).await;
+        for (skip, response) in [
+            (
+                0,
+                json!({"changeEntries":[{"item":{"path":"/one"},"changeType":"edit"},{"item":{"isFolder":true,"path":"/dir"}}],"nextSkip":2}),
+            ),
+            (
+                2,
+                json!({"changeEntries":[{"item":{"path":"/two"},"changeType":"add"}],"nextSkip":0}),
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(
+                    "/org/project/_apis/git/repositories/repo/pullRequests/7/iterations/2/changes",
+                ))
+                .and(query_param("$compareTo", "0"))
+                .and(query_param("$skip", skip.to_string()))
+                .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let changes = api(&server)?
+            .pr_changes(&json!({"pullRequestId":7,"repository":{"id":"repo"}}))
+            .await?;
+        assert_eq!(changes["base"], "base");
+        assert_eq!(changes["head"], "head");
+        assert_eq!(changes["files"].as_array().context("Files")?.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn review_diff_handles_add_delete_rename_binary_and_missing_content() -> Result<()> {
+        for (kind, old_path, old, new, expected) in [
+            (
+                "add",
+                "/file",
+                json!({"content":""}),
+                json!({"content":"added\n"}),
+                "+added",
+            ),
+            (
+                "delete",
+                "/file",
+                json!({"content":"removed\n"}),
+                json!({"content":""}),
+                "-removed",
+            ),
+            (
+                "rename, edit",
+                "/old name",
+                json!({"content":"before\n"}),
+                json!({"content":"after\n"}),
+                "--- a/old name",
+            ),
+            (
+                "edit",
+                "/file",
+                json!({"contentMetadata":{"isBinary":true}}),
+                json!({"content":""}),
+                "Binary file",
+            ),
+            (
+                "edit",
+                "/file",
+                json!({"content":""}),
+                json!({"content":"x".repeat(1024*1024+1)}),
+                "1 MiB",
+            ),
+        ] {
+            let server = MockServer::start().await;
+            for (commit, path_value, body, needed) in [
+                ("base", old_path, old, kind != "add"),
+                ("head", "/file", new, kind != "delete"),
+            ] {
+                Mock::given(method("GET"))
+                    .and(path("/org/project/_apis/git/repositories/repo/items"))
+                    .and(query_param("path", path_value))
+                    .and(query_param("versionDescriptor.version", commit))
+                    .and(query_param("versionDescriptor.versionType", "commit"))
+                    .and(query_param("includeContent", "true"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                    .expect(u64::from(needed))
+                    .mount(&server)
+                    .await;
+            }
+            let diff = api(&server)?
+                .pr_file_diff(
+                    &json!({"repository":"repo","base":"base","head":"head","files":[
+                        {"changeType":kind,"originalPath":old_path,"item":{"path":"/file"}}
+                    ]}),
+                    0,
+                )
+                .await?;
+            assert!(diff.contains(expected), "{diff}");
+            if kind == "rename, edit" {
+                assert!(diff.contains("-before") && diff.contains("+after"));
+            }
+        }
+        let server = MockServer::start().await;
+        mock_get(
+            &server,
+            "/org/project/_apis/git/repositories/repo/items",
+            json!({}),
+        )
+        .await;
+        assert!(api(&server)?.pr_file_diff(&json!({"repository":"repo","base":"base","head":"head","files":[{"changeType":"edit","item":{"path":"/file"}}]}),0).await.is_err());
+        Ok(())
     }
     #[tokio::test]
     async fn repository_list_returns_project_repositories() -> Result<()> {
