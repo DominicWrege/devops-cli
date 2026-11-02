@@ -9,7 +9,7 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.4.2
+mise use -g github:DominicWrege/devops-cli@0.4.3
 devops login
 ```
 
@@ -105,7 +105,9 @@ pane or dialog; `.` expands it, and `h` opens scrollable keyboard help.
 | `q` | Quit outside forms |
 
 Loaded lists and activity stay cached for the TUI session and keep your selected
-row. Press `F5` for fresh data. Refreshes keep existing rows visible, and an
+row. Recent runs reuse the loaded pipeline catalog between automatic refreshes;
+pipeline details load concurrently with up to eight requests at a time.
+Press `F5` for fresh data. Refreshes keep existing rows visible, and an
 animated indicator shows pending requests and elapsed time. `Tab` and `Shift+Tab`
 can switch views while reads are loading. Submitted writes wait for server
 confirmation before you can switch views.
@@ -152,9 +154,14 @@ current branch; it does not clone, fetch, or switch to the PR branch.
 ### Repositories
 
 Press `3` to browse repositories in the current project. Select one with Up/Down;
-its Info tab shows the default branch, status, and HTTPS, SSH, and web URLs.
+its Commits tab opens by default. Info shows the default branch, status, and
+HTTPS, SSH, and web URLs.
+Press `/` in the repository list to filter names as you type (case-insensitive).
+`Enter` keeps the filter; `Esc` clears it. Filtering uses the loaded list and
+preserves the selected repository when it still matches. The filter stays active
+across refreshes and section switches, and resets when you change projects.
 `Enter` or Right focuses details; Left returns to the list. Narrow terminals place
-details below the list. Press `i` for Info, `c` for Commits, or `t` for Tags.
+details below the list. Press `c` for Commits, `i` for Info, or `t` for Tags.
 `[` / `]` and `F7` / `F8` also cycle these tabs. Switching sections preserves the
 repository, tab, branch, and selections.
 

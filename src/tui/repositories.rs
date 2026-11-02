@@ -6,6 +6,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 mod tests;
 
 #[derive(Default)]
+pub(super) struct Filter {
+    pub query: String,
+    pub editing: bool,
+    target: Option<Target>,
+}
+
+#[derive(Default)]
 pub(super) struct History {
     pub commits: Vec<Value>,
     pub selection: ListState,
@@ -88,7 +95,7 @@ impl View {
             return detail["detailChanges"]["head"].as_str();
         }
         match self.tab {
-            1 => {
+            0 => {
                 let history = self.histories.get(&self.branch)?;
                 history
                     .commits
@@ -224,6 +231,117 @@ fn ref_rows(values: &[Value], branches: bool, collapsed: &BTreeSet<String>) -> V
 }
 
 impl App {
+    pub(super) fn scope_repository_filter(&mut self, target: &Target) {
+        if self.repo_filter.target.as_ref() != Some(target) {
+            self.repo_filter = Filter {
+                target: Some(target.clone()),
+                ..Filter::default()
+            };
+        }
+    }
+
+    pub(super) fn show_repositories(&mut self, mut items: Vec<Value>) {
+        let selected_id = if let Screen::Repos(previous) = &self.screen {
+            previous
+                .get(self.selection.selected().unwrap_or(0))
+                .and_then(|repo| repo["id"].as_str())
+                .map(str::to_owned)
+        } else {
+            None
+        };
+        let query = self.repo_filter.query.to_lowercase();
+        items.retain(|repo| text(repo, "name").to_lowercase().contains(&query));
+        let selected = selected_id.map(|id| {
+            items
+                .iter()
+                .position(|repo| repo["id"].as_str() == Some(&id))
+                .unwrap_or(0)
+        });
+        self.set_screen(Screen::Repos(items));
+        if let Some(selected) = selected {
+            self.selection.select(Some(selected));
+        }
+    }
+
+    pub(super) fn apply_repository_filter(&mut self) -> Result<()> {
+        let target = self
+            .settings
+            .target(self.org.as_deref(), self.project.as_deref())?;
+        if let Some((cached, items)) = &self.repo_cache
+            && *cached == target
+        {
+            self.show_repositories(items.clone());
+        }
+        Ok(())
+    }
+
+    pub(super) fn handle_repository_filter(&mut self, key: event::KeyEvent) -> Result<bool> {
+        let Screen::Repos(items) = &self.screen else {
+            return Ok(false);
+        };
+        if self.repo_filter.editing {
+            match key.code {
+                KeyCode::Enter => self.repo_filter.editing = false,
+                KeyCode::Esc => {
+                    self.repo_filter.editing = false;
+                    self.repo_filter.query.clear();
+                    self.apply_repository_filter()?;
+                }
+                KeyCode::Backspace => {
+                    self.repo_filter.query.pop();
+                    self.apply_repository_filter()?;
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.repo_filter.query.clear();
+                    self.apply_repository_filter()?;
+                }
+                KeyCode::Char(c)
+                    if !c.is_control()
+                        && !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    self.repo_filter.query.push(c);
+                    self.apply_repository_filter()?;
+                }
+                KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
+                    return Ok(false);
+                }
+                _ => (),
+            }
+            return Ok(true);
+        }
+        if self.pane_focus != 0
+            || self
+                .repository_view()
+                .is_some_and(|view| view.detail.is_some() || view.picking_branch)
+        {
+            return Ok(false);
+        }
+        if key.code == KeyCode::Char('/') {
+            let target = self
+                .settings
+                .target(self.org.as_deref(), self.project.as_deref())?;
+            let items = items.clone();
+            self.scope_repository_filter(&target);
+            if self
+                .repo_cache
+                .as_ref()
+                .is_none_or(|(cached, _)| *cached != target)
+            {
+                self.repo_cache = Some((target, items));
+            }
+            self.repo_filter.editing = true;
+            return Ok(true);
+        }
+        if key.code == KeyCode::Esc && !self.repo_filter.query.is_empty() {
+            self.repo_filter.query.clear();
+            self.apply_repository_filter()?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     fn repository(&self) -> Result<(String, Value)> {
         let Screen::Repos(items) = &self.screen else {
             anyhow::bail!("Select a repository first");
@@ -261,9 +379,9 @@ impl App {
             if !refresh && view.branches.is_some() {
                 return Ok(());
             }
-        } else if view.tab == 0
+        } else if view.tab == 1
             || view.tab == 2 && !refresh && view.tags.is_some()
-            || view.tab == 1
+            || view.tab == 0
                 && (view.branch.is_empty()
                     || !refresh && !more && view.histories.contains_key(&view.branch))
         {
@@ -469,9 +587,8 @@ impl App {
         if view.detail.is_some() {
             return self.open_repository_commit();
         }
-        if !view.picking_branch && view.tab == 0 {
-            self.repo_cache = None;
-            return self.load_repos();
+        if !view.picking_branch && view.tab == 1 {
+            return self.reload_repositories();
         }
         self.load_repository(false, true)
     }
@@ -489,8 +606,8 @@ impl App {
             None
         } else {
             match key.code {
-                KeyCode::Char('i') => Some(0),
-                KeyCode::Char('c') => Some(1),
+                KeyCode::Char('c') => Some(0),
+                KeyCode::Char('i') => Some(1),
                 KeyCode::Char('t') => Some(2),
                 _ => None,
             }
@@ -646,7 +763,7 @@ impl App {
             return Ok(false);
         }
         let tab = self.repository_view_mut()?.tab;
-        if tab == 0 && !picking {
+        if tab == 1 && !picking {
             return Ok(false);
         }
         let step = if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
@@ -730,7 +847,7 @@ impl App {
                             .trim_start_matches("refs/heads/")
                             .into();
                         view.picking_branch = false;
-                        view.tab = 1;
+                        view.tab = 0;
                         self.cancel_task();
                         self.load_repository(false, false)?;
                     } else if self.task.is_none() {
@@ -740,7 +857,7 @@ impl App {
                 }
             }
         }
-        if tab == 1 && !picking {
+        if tab == 0 && !picking {
             match key.code {
                 KeyCode::Enter if self.task.is_none() => {
                     self.open_repository_commit()?;
@@ -767,10 +884,45 @@ fn date(value: &Value) -> String {
 }
 
 pub(super) fn render(frame: &mut Frame, area: Rect, app: &mut App, repos: &[Value]) {
+    let filtering = app.repo_filter.editing || !app.repo_filter.query.is_empty();
+    let layout = Layout::vertical([Constraint::Length(u16::from(filtering)), Constraint::Min(0)])
+        .split(area);
+    if filtering {
+        let total = app
+            .repo_cache
+            .as_ref()
+            .map_or(repos.len(), |(_, items)| items.len());
+        let count = format!("{} / {total}", repos.len());
+        let fields = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(count.len() as u16 + 2),
+        ])
+        .split(layout[0]);
+        let input = format!("Filter: {}", app.repo_filter.query);
+        let width = Line::raw(&input).width() as u16;
+        let scroll = width.saturating_sub(fields[0].width.saturating_sub(1));
+        frame.render_widget(
+            Paragraph::new(input)
+                .scroll((0, scroll))
+                .style(Style::default().fg(if app.repo_filter.editing {
+                    Color::Cyan
+                } else {
+                    Color::Gray
+                })),
+            fields[0],
+        );
+        frame.render_widget(Paragraph::new(count).right_aligned(), fields[1]);
+        if app.repo_filter.editing && fields[0].width > 0 && fields[0].height > 0 {
+            frame.set_cursor_position((fields[0].x + width - scroll, fields[0].y));
+        }
+    }
+    let area = layout[1];
     let Some(repo) = repos.get(app.selection.selected().unwrap_or(0)) else {
         frame.render_widget(
             Paragraph::new(if app.task.is_some() {
                 "Loading repositories..."
+            } else if !app.repo_filter.query.is_empty() {
+                "No repositories match the filter. Press Esc to clear."
             } else {
                 "No repositories in this project. Press F5 to refresh."
             })
@@ -826,7 +978,7 @@ pub(super) fn render(frame: &mut Frame, area: Rect, app: &mut App, repos: &[Valu
     };
     frame.render_widget(
         Paragraph::new(Line::from(
-            ["Info [i]", "Commits [c]", "Tags [t]"]
+            ["Commits [c]", "Info [i]", "Tags [t]"]
                 .into_iter()
                 .enumerate()
                 .flat_map(|(i, s)| {
@@ -848,10 +1000,10 @@ pub(super) fn render(frame: &mut Frame, area: Rect, app: &mut App, repos: &[Valu
     );
     if view.picking_branch {
         render_refs(frame, layout[1], view, horizontal, loading);
-    } else if view.tab == 0 {
+    } else if view.tab == 1 {
         let branch = text(repo, "defaultBranch").trim_start_matches("refs/heads/");
         frame.render_widget(Paragraph::new(output::clean(&format!("Default branch: {}\nStatus: {}\nID: {}\n\nHTTPS clone\n{}\n\nSSH clone\n{}\n\nWeb\n{}", if branch.is_empty() { "Not set" } else { branch }, if repo["isDisabled"] == true { "Disabled" } else { "Enabled" }, text(repo,"id"), text(repo,"remoteUrl"), text(repo,"sshUrl"), text(repo,"webUrl")))).wrap(Wrap { trim: false }).scroll((detail_scroll,horizontal)), layout[1]);
-    } else if view.tab == 1 {
+    } else if view.tab == 0 {
         render_commits(frame, layout[1], view, horizontal, loading);
     } else {
         render_refs(frame, layout[1], view, horizontal, loading);
