@@ -109,17 +109,16 @@ jobs:
           \`mise use -g github:$GH_REPO@$VERSION\`
 
           Start setup with \`devops login\`. Enter your organization and a personal access token at the masked prompt; no Entra app registration is required. Entra sign-in remains available with \`--entra\`.
-          Version 0.4.3 adds repository filtering and improves pipeline list loading.
+          Version 0.4.4 adds tag management and local path browsing.
 
-          - Press / in the repository list to filter names as you type, without extra API calls. Matching ignores case. Enter keeps the filter; Esc clears it.
-          - Repository filters preserve matching selections, survive refreshes and section switches, and reset when you change projects.
-          - Repository details now open Commits first, followed by Info and Tags. The c/i/t shortcuts and bracket/function-key cycling follow this order.
-          - Pipeline details load with up to eight concurrent requests through a shared HTTP client, preserving pagination and YAML-only filtering.
-          - Recent Runs reuses the pipeline catalog for automatic refreshes and the All Pipelines list.
-          - Removed the redundant Sections shortcut hint from the footer. Section switching remains available through Tab and 1/2/3.
+          - Press n in Commits or Tags to create a lightweight tag, with an editable commit SHA prefilled from the selected commit when available.
+          - In Tags, press e to rename an individual tag, or d / Delete to delete it after confirmation. Renaming preserves its object and annotations, creates the new name first, and reports any failure to remove the old name.
+          - Tag updates reject invalid names and duplicate destinations, protect against concurrent ref changes, and refresh the list after a successful save.
+          - Press F2 in editor path fields to browse local directories and executable files. Ctrl+S chooses the current directory; Esc returns without changing the form.
+          - Settings now includes a Code base path for each organization and project. Editor forms start in a matching repository folder when available, while saved checkout choices take precedence.
 
           Text diffs are limited to 1 MiB per side. Binary files and submodules direct you to the browser.
-          Live tenant loading speed has not been benchmarked. Live tenant behavior and local Linux/WSL integration were not retested for this patch; mock API and TUI tests cover these changes.
+          Live tenant tag writes and local Linux/WSL integration were not retested for this patch; mock API and TUI tests cover these changes.
 
           Linux uses a static musl binary, with no glibc requirement. ARM64 and macOS builds are not provided.
           Live tenant authentication acceptance is still required. See the README and docs/acceptance.md.

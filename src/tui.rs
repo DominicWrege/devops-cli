@@ -31,6 +31,7 @@ use std::{
 use tokio::{sync::mpsc, task::JoinHandle};
 
 mod chrome;
+mod file_browser;
 #[cfg(test)]
 mod interaction_tests;
 mod repositories;
@@ -129,7 +130,9 @@ enum Message {
 
 enum FormKind {
     OpenEditor(String),
+    CodeBase(String),
     PipelineEdit(i32),
+    Tag(repositories::TagForm),
     Identity,
     PatIdentity,
     Create,
@@ -158,6 +161,7 @@ struct Form {
     kind: FormKind,
     fields: Vec<Field>,
     selected: usize,
+    browser: Option<file_browser::Browser>,
 }
 impl Form {
     fn new(kind: FormKind, fields: Vec<(&'static str, String)>) -> Self {
@@ -174,6 +178,7 @@ impl Form {
                 })
                 .collect(),
             selected: 0,
+            browser: None,
         }
     }
     fn value(&self, i: usize) -> Result<&str> {
@@ -186,6 +191,14 @@ impl Form {
         self.fields
             .get_mut(self.selected)
             .context("No field selected")
+    }
+    fn browser_kind(&self) -> Option<file_browser::Kind> {
+        match self.kind {
+            FormKind::CodeBase(_) => Some(file_browser::Kind::Directory),
+            FormKind::OpenEditor(_) if self.selected == 0 => Some(file_browser::Kind::Directory),
+            FormKind::OpenEditor(_) => Some(file_browser::Kind::File),
+            _ => None,
+        }
     }
     fn command(&self) -> Result<PrCommand> {
         let list = |i: usize| -> Result<Vec<String>> {
@@ -233,7 +246,9 @@ impl Form {
                 yes: true,
             },
             FormKind::OpenEditor(_)
+            | FormKind::CodeBase(_)
             | FormKind::PipelineEdit(_)
+            | FormKind::Tag(_)
             | FormKind::Identity
             | FormKind::PatIdentity => {
                 anyhow::bail!("Not a PR action")
@@ -268,6 +283,7 @@ struct App {
     pane_y: [u16; 3],
     form: Option<Form>,
     confirm: Option<PrCommand>,
+    tag_confirm: Option<repositories::TagWrite>,
     pr_actions: bool,
     help_scroll: Option<u16>,
     expanded_commands: bool,
@@ -345,6 +361,7 @@ impl App {
             pane_y: [0; 3],
             form: None,
             confirm: None,
+            tag_confirm: None,
             pr_actions: false,
             help_scroll: None,
             expanded_commands: false,
@@ -819,6 +836,22 @@ impl App {
                 .checkouts
                 .get(&repo_url)
                 .cloned()
+                .or_else(|| {
+                    self.settings.code_base_path(&target).map(|base| {
+                        let name = text(repo, "name");
+                        // Only use a single directory name from remote repository data.
+                        let mut components = std::path::Path::new(name).components();
+                        let safe =
+                            matches!(components.next(), Some(std::path::Component::Normal(_)))
+                                && components.next().is_none();
+                        let candidate = base.join(name);
+                        if safe && candidate.is_dir() {
+                            candidate
+                        } else {
+                            base.to_owned()
+                        }
+                    })
+                })
                 .unwrap_or(std::env::current_dir()?);
             let name = text(repo, "name").to_owned();
             self.form = Some(Form::new(
@@ -842,6 +875,25 @@ impl App {
             crate::external::browse(&url)?;
             self.status = format!("Opened {url}");
         }
+        Ok(())
+    }
+    fn code_base_form(&mut self) -> Result<()> {
+        let target = self
+            .settings
+            .target(self.org.as_deref(), self.project.as_deref())?;
+        let path = self
+            .settings
+            .code_base_path(&target)
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        self.form = Some(Form::new(
+            FormKind::CodeBase(Settings::project_key(&target)),
+            vec![("Code base directory", path)],
+        ));
+        self.status = format!(
+            "Code base for {} / {}. F2 to browse; blank to clear.",
+            target.organization, target.project
+        );
         Ok(())
     }
     fn execute_pr(&mut self, command: PrCommand) -> Result<()> {
@@ -1094,6 +1146,31 @@ impl App {
     }
     fn submit(&mut self) -> Result<()> {
         let form = self.form.as_ref().context("No form")?;
+        if matches!(form.kind, FormKind::Tag(_)) {
+            return self.submit_tag();
+        }
+        if let FormKind::CodeBase(key) = &form.kind {
+            let mut settings = self.settings.clone();
+            let value = form.value(0)?;
+            let clear = value.is_empty();
+            if clear {
+                settings.code_base_paths.remove(key);
+            } else {
+                let path = std::path::absolute(value)?;
+                ensure!(path.is_dir(), "Code base must be an existing directory");
+                settings.code_base_paths.insert(key.clone(), path);
+            }
+            self.store.save(&settings)?;
+            self.settings = settings;
+            self.form = None;
+            self.status = if clear {
+                "Code base path cleared"
+            } else {
+                "Code base path saved"
+            }
+            .into();
+            return Ok(());
+        }
         if let FormKind::OpenEditor(repo_key) = &form.kind {
             let root = crate::external::open_editor(
                 &self.store,
@@ -1350,12 +1427,14 @@ impl App {
         Ok(())
     }
     fn handle(&mut self, event: Event) -> Result<bool> {
-        if self.writing && self.form.is_some() {
+        if self.writing && (self.form.is_some() || matches!(self.screen, Screen::Repos(_))) {
             return Ok(false);
         }
         if let Event::Paste(paste) = &event {
             if let Some(form) = &mut self.form {
-                form.selected_field()?.value.push_str(&output::clean(paste));
+                if form.browser.is_none() {
+                    form.selected_field()?.value.push_str(&output::clean(paste));
+                }
             } else if matches!(self.screen, Screen::Repos(_)) && self.repo_filter.editing {
                 self.repo_filter.query.push_str(&output::cell(paste));
                 self.apply_repository_filter()?;
@@ -1379,6 +1458,14 @@ impl App {
                 KeyCode::PageDown => *scroll = scroll.saturating_add(10),
                 KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
                 _ => (),
+            }
+            return Ok(false);
+        }
+        if let Some(write) = self.tag_confirm.take() {
+            match key.code {
+                KeyCode::Char('y') => self.execute_tag(write)?,
+                KeyCode::Char('n') | KeyCode::Esc => self.status = "Canceled".into(),
+                _ => self.tag_confirm = Some(write),
             }
             return Ok(false);
         }
@@ -1407,8 +1494,27 @@ impl App {
         }
         if let Some(form) = &mut self.form {
             ensure!(!form.fields.is_empty(), "Form has no fields");
+            if let Some(browser) = &mut form.browser {
+                match browser.key(key) {
+                    file_browser::Action::Stay => (),
+                    file_browser::Action::Cancel => form.browser = None,
+                    file_browser::Action::Selected(path) => {
+                        form.selected_field()?.value = path.display().to_string();
+                        form.browser = None;
+                    }
+                }
+                return Ok(false);
+            }
             match key.code {
                 KeyCode::Esc => self.form = None,
+                KeyCode::F(2) => {
+                    if let Some(kind) = form.browser_kind() {
+                        form.browser = Some(file_browser::Browser::new(
+                            form.value(form.selected)?,
+                            kind,
+                        )?);
+                    }
+                }
                 KeyCode::Tab | KeyCode::Down => {
                     form.selected = (form.selected + 1) % form.fields.len()
                 }
@@ -1443,19 +1549,20 @@ impl App {
         if let Some(selected) = self.settings_menu {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('s') => self.settings_menu = None,
-                KeyCode::Up
-                | KeyCode::Down
-                | KeyCode::Tab
-                | KeyCode::BackTab
-                | KeyCode::Char('j' | 'k') => {
-                    self.settings_menu = Some(1 - selected);
+                KeyCode::Down | KeyCode::Tab | KeyCode::Char('j') => {
+                    self.settings_menu = Some((selected + 1) % 3);
+                }
+                KeyCode::Up | KeyCode::BackTab | KeyCode::Char('k') => {
+                    self.settings_menu = Some((selected + 2) % 3);
                 }
                 KeyCode::Enter => {
                     self.settings_menu = None;
                     if selected == 0 {
                         self.choose_project()?;
-                    } else {
+                    } else if selected == 1 {
                         self.identity_form();
+                    } else {
+                        self.code_base_form()?;
                     }
                 }
                 KeyCode::Char('q') => return Ok(true),
@@ -2183,10 +2290,26 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
     }
     let hints: &[&str] = if app.help_scroll.is_some() {
         &["Close [Esc]"]
-    } else if app.confirm.is_some() {
+    } else if app.confirm.is_some() || app.tag_confirm.is_some() {
         &["Confirm [y]", "Cancel [n/Esc]"]
     } else if let Some(form) = &app.form {
-        if form.fields.get(form.selected).is_some_and(Field::multiline) {
+        if form.browser.is_some() {
+            &[
+                "Open [Enter/→]",
+                "Choose [Ctrl+S]",
+                "Parent [Backspace/←]",
+                "Select [↑↓]",
+                "Cancel [Esc]",
+            ]
+        } else if form.browser_kind().is_some() {
+            &[
+                "Browse [F2]",
+                "Save [Enter/Ctrl+S]",
+                "Field [Tab]",
+                "Clear [Ctrl+U]",
+                "Cancel [Esc]",
+            ]
+        } else if form.fields.get(form.selected).is_some_and(Field::multiline) {
             &[
                 "Save [Ctrl+S]",
                 "New line [Enter]",
@@ -2259,6 +2382,7 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
             ],
             Screen::Repos(_) if app.repository_view().is_some_and(|v| v.tab == 0) => &[
                 "Commit [Enter]",
+                "New tag [n]",
                 "Branch [r]",
                 "More [m]",
                 "Tabs [c/i/t]",
@@ -2268,6 +2392,9 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
             ],
             Screen::Repos(_) if app.repository_view().is_some_and(|v| v.tab == 2) => &[
                 "Commit/Fold [Enter]",
+                "New tag [n]",
+                "Rename [e]",
+                "Delete [d/Del]",
                 "Fold [←/→]",
                 "Tabs [c/i/t]",
                 "Browser [b]",
@@ -2343,6 +2470,10 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
         .iter()
         .map(|hint| {
             let enabled = !app.writing
+                && (!matches!(*hint, "Rename [e]" | "Delete [d/Del]")
+                    || app
+                        .repository_view()
+                        .is_some_and(|view| view.selected_ref().is_some()))
                 && !(!matches!(app.screen, Screen::Pr { ref value } if value["status"] == "active")
                     && *hint == "Approve [v]")
                 && !(app.form.is_none()
@@ -2364,6 +2495,7 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
     }
     if app.form.is_none()
         && app.confirm.is_none()
+        && app.tag_confirm.is_none()
         && app.settings_menu.is_none()
         && !app.pr_actions
         && app.help_scroll.is_none()
@@ -2389,6 +2521,10 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
 }
 
 fn draw_form(frame: &mut Frame, area: Rect, form: &Form, status: &str) {
+    if let Some(browser) = &form.browser {
+        browser.draw(frame, area);
+        return;
+    }
     let width = area.width.min(76);
     let content_width = width.saturating_sub(4).max(1) as usize;
     let mut lines = Vec::new();
@@ -2427,12 +2563,18 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &Form, status: &str) {
     if matches!(form.kind, FormKind::PipelineEdit(_)) {
         lines.push(Line::raw("Folder: / for root, or /Team/Project."));
     }
+    if form.browser_kind().is_some() {
+        lines.push(Line::raw("F2: browse for the selected path."));
+    }
     if !status.is_empty() {
         lines.push(Line::raw(output::cell(status)));
     }
     let title = match form.kind {
         FormKind::OpenEditor(_) => "Open existing checkout in editor",
+        FormKind::CodeBase(_) => "Project code base path",
         FormKind::PipelineEdit(_) => "Edit pipeline",
+        FormKind::Tag(ref edit) if edit.original.is_some() => "Rename tag",
+        FormKind::Tag(_) => "Create tag",
         FormKind::Identity | FormKind::PatIdentity => "Sign in and setup",
         FormKind::Create => "Create pull request",
         FormKind::Edit(_) => "Edit pull request",
@@ -2481,6 +2623,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
     let commands = command_hints(app);
     let expandable = app.form.is_none()
         && app.confirm.is_none()
+        && app.tag_confirm.is_none()
         && app.settings_menu.is_none()
         && !app.pr_actions
         && app.help_scroll.is_none();
@@ -2504,7 +2647,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
     frame.render_widget(Paragraph::new(output::cell(&status_text)), layout[2]);
     draw_commands(frame, layout[3], &commands, expanded, expandable);
     if let Some(selected) = app.settings_menu {
-        let popup = popup(area, 66, 6);
+        let popup = popup(area, 76, 7);
         frame.render_widget(Clear, popup);
         let rows = vec![
             format!(
@@ -2512,6 +2655,15 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 app.settings.project.as_deref().unwrap_or("Not selected")
             ),
             "Account           Sign in or replace token".into(),
+            format!(
+                "Code base path    {}",
+                app.settings
+                    .target(app.org.as_deref(), app.project.as_deref())
+                    .ok()
+                    .and_then(|target| app.settings.code_base_path(&target))
+                    .map(|path| output::cell(&path.display().to_string()))
+                    .unwrap_or_else(|| "Not set".into())
+            ),
         ];
         let mut state = ListState::default().with_selected(Some(selected));
         draw_list(
@@ -2536,6 +2688,21 @@ fn draw(frame: &mut Frame, app: &mut App) {
         frame.render_widget(
             Paragraph::new("v  Approve\nb  Open in browser\no  Open checkout in editor\nc  Comment\ne  Edit\nm  Merge\na  Abandon\nr  Reactivate\nn  Create a PR\n\nPress an action key. Esc to close.")
                 .block(pane_block("PR actions", true)),
+            popup,
+        );
+    }
+    if let Some(write) = &app.tag_confirm {
+        let popup = popup(area, 76, 10);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Delete tag {}?\nRepository: {}\nTarget: {}\n\ny: confirm   n/Esc: cancel",
+                output::cell(write.change.name().trim_start_matches("refs/tags/")),
+                output::cell(&write.repo),
+                output::cell(&context)
+            ))
+            .wrap(Wrap { trim: false })
+            .block(pane_block("Confirm remote write", true)),
             popup,
         );
     }
@@ -2602,6 +2769,8 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 "Right enters details; Left returns to the list.",
                 "Use [ and ] or F7/F8 for PR and repository tabs.",
                 "Repository tabs: c Commits, i Info, t Tags.",
+                "Commits/Tags: n creates a tag at the selected commit (editable SHA).",
+                "Tags: e renames a tag; d or Delete asks to delete it.",
                 "Repository list: / filters names; Enter keeps it, Esc clears it.",
                 "PR tabs: d Description, c Comments, t Status, f Files.",
                 "PR comment: ? opens actions, then c adds a comment.",
@@ -2610,6 +2779,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 "Commit: Enter opens files; Enter on a file loads its diff.",
                 "Use Shift+arrows to pan long lines.",
                 "Forms: Tab changes fields. Ctrl+U clears a field.",
+                "Editor/code base paths: F2 browses; Ctrl+S chooses a path.",
                 "Enter inserts a line in Description and Comment.",
                 "Ctrl+S submits; Enter also submits single-line fields.",
                 "Esc closes the current dialog or returns to the list.",

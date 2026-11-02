@@ -172,6 +172,162 @@ fn editor_shortcut_works_for_repos_and_prs_and_keeps_invalid_path_for_retry() ->
     Ok(())
 }
 
+#[test]
+fn editor_browser_navigates_directories_selects_files_and_cancels_without_losing_input()
+-> Result<()> {
+    let (root, mut app) = fixture()?;
+    let base = root.path().join("code base");
+    let checkout = base.join("demo");
+    std::fs::create_dir_all(&checkout)?;
+    let executable = base.join("my editor.exe");
+    std::fs::write(&executable, "test fixture")?;
+    app.screen = Screen::Repos(vec![json!({"name":"demo"})]);
+    app.handle(key(KeyCode::Char('o')))?;
+    {
+        let form = app.form.as_mut().context("Editor form")?;
+        form.fields[0].value = base.display().to_string();
+        form.fields[1].value = executable.display().to_string();
+    }
+    app.handle(key(KeyCode::F(2)))?;
+    for width in [36, 70, 120] {
+        let rendered = contents(&render(&mut app, width, 25)?);
+        assert!(rendered.contains("Choose directory"));
+        assert!(rendered.contains("demo/"));
+        assert!(!rendered.contains("my editor.exe"));
+        assert!(rendered.contains("Choose [Ctrl+S]"));
+    }
+    // Paste and field navigation must not edit the form behind the browser.
+    app.handle(Event::Paste("unwanted text".into()))?;
+    app.handle(key(KeyCode::Tab))?;
+    assert_eq!(
+        app.form.as_ref().context("Form")?.value(0)?,
+        base.display().to_string()
+    );
+    app.handle(key(KeyCode::Down))?; // demo, after ../
+    app.handle(key(KeyCode::Enter))?;
+    app.handle(key(KeyCode::Backspace))?;
+    app.handle(key(KeyCode::Enter))?; // parent navigation remembers demo
+    app.handle(Event::Key(event::KeyEvent::new(
+        KeyCode::Char('s'),
+        KeyModifiers::CONTROL,
+    )))?;
+    let form = app.form.as_ref().context("Editor form")?;
+    assert!(form.browser.is_none());
+    assert_eq!(form.value(0)?, checkout.display().to_string());
+    assert!(!app.store.root.join("editor.json").exists());
+
+    app.handle(key(KeyCode::F(2)))?;
+    app.handle(key(KeyCode::Backspace))?;
+    app.handle(key(KeyCode::Esc))?;
+    assert_eq!(
+        app.form.as_ref().context("Form")?.value(0)?,
+        checkout.display().to_string()
+    );
+
+    app.handle(key(KeyCode::Tab))?;
+    app.handle(key(KeyCode::F(2)))?;
+    assert!(contents(&render(&mut app, 70, 25)?).contains("my editor.exe"));
+    app.handle(key(KeyCode::Enter))?; // existing executable is preselected
+    let form = app.form.as_ref().context("Editor form")?;
+    assert!(form.browser.is_none());
+    assert_eq!(form.value(1)?, executable.display().to_string());
+    assert_eq!(form.selected, 1);
+    app.handle(key(KeyCode::Esc))?;
+    assert!(app.form.is_none());
+    Ok(())
+}
+
+#[test]
+fn project_code_base_setting_persists_and_seeds_editor_paths_without_replacing_saved_checkouts()
+-> Result<()> {
+    let (root, mut app) = fixture()?;
+    let base = root.path().join("code base");
+    let checkout = base.join("demo");
+    std::fs::create_dir_all(&checkout)?;
+    app.screen = Screen::Repos(vec![json!({"name":"demo"})]);
+    app.handle(key(KeyCode::Char('s')))?;
+    app.handle(key(KeyCode::Up))?; // wrap to the third settings entry
+    assert_eq!(app.settings_menu, Some(2));
+    assert!(contents(&render(&mut app, 80, 25)?).contains("Code base path"));
+    app.handle(key(KeyCode::Enter))?;
+    app.form.as_mut().context("Code base form")?.fields[0].value =
+        base.join("missing").display().to_string();
+    assert!(app.submit().is_err());
+    assert!(app.settings.code_base_paths.is_empty());
+    assert!(app.form.is_some());
+
+    // A missing path starts the browser at its nearest existing parent.
+    app.handle(key(KeyCode::F(2)))?;
+    app.handle(Event::Key(event::KeyEvent::new(
+        KeyCode::Char('s'),
+        KeyModifiers::CONTROL,
+    )))?;
+    assert_eq!(
+        app.form.as_ref().context("Form")?.value(0)?,
+        base.display().to_string()
+    );
+    app.handle(key(KeyCode::Enter))?;
+    let target = app.settings.target(None, None)?;
+    assert_eq!(
+        app.store.load()?.code_base_path(&target),
+        Some(base.as_path())
+    );
+    app.handle(key(KeyCode::Char('o')))?;
+    assert_eq!(
+        app.form.as_ref().context("Editor form")?.value(0)?,
+        checkout.display().to_string()
+    );
+    app.handle(key(KeyCode::Esc))?;
+
+    // PRs use the same project base; repositories without a matching folder start at the base.
+    app.screen = Screen::Pr {
+        value: json!({"pullRequestId":7,"repository":{"name":"other"}}),
+    };
+    app.handle(key(KeyCode::Char('o')))?;
+    assert_eq!(
+        app.form.as_ref().context("Editor form")?.value(0)?,
+        base.display().to_string()
+    );
+    app.handle(key(KeyCode::Esc))?;
+    let saved = root.path().join("saved checkout");
+    std::fs::create_dir(&saved)?;
+    let mut editor = crate::external::EditorSettings::default();
+    editor.checkouts.insert(
+        crate::external::repo_url(&target, &json!({"name":"other"}))?,
+        saved.clone(),
+    );
+    app.store.write("editor.json", &editor)?;
+    app.handle(key(KeyCode::Char('o')))?;
+    assert_eq!(
+        app.form.as_ref().context("Editor form")?.value(0)?,
+        saved.display().to_string()
+    );
+    app.handle(key(KeyCode::Esc))?;
+
+    app.settings.project = Some("another project".into());
+    let other_target = app.settings.target(None, None)?;
+    assert!(app.settings.code_base_path(&other_target).is_none());
+    app.code_base_form()?;
+    assert_eq!(app.form.as_ref().context("Form")?.value(0)?, "");
+    app.handle(key(KeyCode::Esc))?;
+    app.settings.project = Some(target.project.clone());
+    app.code_base_form()?;
+    app.handle(Event::Key(event::KeyEvent::new(
+        KeyCode::Char('u'),
+        KeyModifiers::CONTROL,
+    )))?;
+    app.handle(key(KeyCode::Enter))?;
+    assert!(app.store.load()?.code_base_path(&target).is_none());
+    assert_eq!(
+        crate::external::EditorSettings::load(&app.store)?
+            .checkouts
+            .values()
+            .next(),
+        Some(&saved)
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn three_sections_cycle_in_order_and_number_keys_switch_during_reads() -> Result<()> {
     let (_root, mut app) = fixture()?;

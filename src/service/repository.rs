@@ -1,6 +1,9 @@
 use super::*;
 use std::collections::{BTreeSet, HashMap};
 
+mod tags;
+pub(crate) use tags::{TagChange, tag_name};
+
 pub(crate) fn ref_commit(value: &Value) -> &str {
     value["peeledObjectId"]
         .as_str()

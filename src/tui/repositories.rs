@@ -1,9 +1,12 @@
 use super::*;
-use crate::service::{commit_date, ref_commit};
+use crate::service::{TagChange, commit_date, ref_commit, tag_name};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 #[cfg(test)]
 mod tests;
+
+mod tags;
+pub(super) use tags::{TagForm, TagWrite};
 
 #[derive(Default)]
 pub(super) struct Filter {
@@ -81,7 +84,7 @@ impl View {
         }
     }
 
-    fn selected_ref(&self) -> Option<usize> {
+    pub(super) fn selected_ref(&self) -> Option<usize> {
         let state = if self.picking_branch {
             &self.branch_selection
         } else {
@@ -109,6 +112,10 @@ impl View {
 }
 
 pub(super) enum Reply {
+    TagWritten {
+        change: TagChange,
+        refreshed: Result<Vec<Value>, String>,
+    },
     Commits {
         branch: String,
         skip: usize,
@@ -437,6 +444,9 @@ impl App {
             return;
         };
         match reply {
+            Reply::TagWritten { change, refreshed } => {
+                self.receive_tag_write(key, change, refreshed)
+            }
             Reply::Commits {
                 branch,
                 skip,
@@ -599,6 +609,31 @@ impl App {
         }
         let detail = self.repository_view_mut()?.detail.is_some();
         let picking = self.repository_view_mut()?.picking_branch;
+        let tab = self.repository_view_mut()?.tab;
+        if !detail
+            && !picking
+            && self.pane_focus == 1
+            && self.task.is_none()
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            match key.code {
+                KeyCode::Char('n') if tab == 0 || tab == 2 => {
+                    self.open_tag_form(false)?;
+                    return Ok(true);
+                }
+                KeyCode::Char('e') if tab == 2 => {
+                    self.open_tag_form(true)?;
+                    return Ok(true);
+                }
+                KeyCode::Char('d') | KeyCode::Delete if tab == 2 => {
+                    self.confirm_tag_delete()?;
+                    return Ok(true);
+                }
+                _ => (),
+            }
+        }
         let direct_tab = if key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
