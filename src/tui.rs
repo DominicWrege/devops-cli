@@ -100,7 +100,10 @@ enum Message {
         diff: String,
     },
     Pipelines(Vec<Value>),
-    Recent(Vec<Value>),
+    Recent {
+        pipelines: Vec<Value>,
+        values: Vec<Value>,
+    },
     Runs {
         pipeline: i32,
         values: Vec<Value>,
@@ -282,6 +285,7 @@ struct App {
     pr_cache: Option<(Target, bool, Vec<Value>)>,
     pipeline_cache: Option<(Target, Vec<Value>)>,
     repo_cache: Option<(Target, Vec<Value>)>,
+    repo_filter: repositories::Filter,
     repo_views: std::collections::HashMap<String, repositories::View>,
     activity_cache: std::collections::HashMap<String, Vec<Value>>,
     pr_selection: usize,
@@ -358,6 +362,7 @@ impl App {
             pr_cache: None,
             pipeline_cache: None,
             repo_cache: None,
+            repo_filter: repositories::Filter::default(),
             repo_views: std::collections::HashMap::new(),
             activity_cache: std::collections::HashMap::new(),
             pr_selection: 0,
@@ -613,19 +618,23 @@ impl App {
         let target = self
             .settings
             .target(self.org.as_deref(), self.project.as_deref())?;
+        self.scope_repository_filter(&target);
         if let Some((cached, items)) = &self.repo_cache
             && *cached == target
         {
             let items = items.clone();
             self.cancel_task();
-            self.set_screen(Screen::Repos(items));
+            self.show_repositories(items);
             self.status = "F5 refreshes this view".into();
             return Ok(());
         }
-        let api = self.api()?;
         if !matches!(self.screen, Screen::Repos(_)) {
             self.set_screen(Screen::Repos(Vec::new()));
         }
+        self.reload_repositories()
+    }
+    fn reload_repositories(&mut self) -> Result<()> {
+        let api = self.api()?;
         self.launch(async move { Ok(Message::Repos(api.repo_list().await?)) });
         Ok(())
     }
@@ -648,7 +657,8 @@ impl App {
                 Some(values) => values,
                 None => api.pipeline_list().await?,
             };
-            Ok(Message::Recent(api.recent_runs(&pipelines).await?))
+            let values = api.recent_runs(&pipelines).await?;
+            Ok(Message::Recent { pipelines, values })
         });
         Ok(())
     }
@@ -933,7 +943,17 @@ impl App {
                 self.set_screen(Screen::Projects(items));
                 self.selection.select(Some(selected));
             }
-            Message::Recent(items) => {
+            Message::Recent {
+                mut pipelines,
+                values: items,
+            } => {
+                if let Ok(target) = self
+                    .settings
+                    .target(self.org.as_deref(), self.project.as_deref())
+                {
+                    sort_pipelines(&mut pipelines);
+                    self.pipeline_cache = Some((target, pipelines));
+                }
                 if let Screen::Recent(previous) = &self.screen {
                     let selected_id = previous
                         .get(self.selection.selected().unwrap_or(0))
@@ -947,27 +967,15 @@ impl App {
                 }
             }
             Message::Repos(mut items) => {
-                let selected_id = if let Screen::Repos(previous) = &self.screen {
-                    previous
-                        .get(self.selection.selected().unwrap_or(0))
-                        .and_then(|v| v["id"].as_str())
-                        .map(str::to_owned)
-                } else {
-                    None
-                };
                 items.sort_by_key(|v| text(v, "name").to_lowercase());
-                if let Some(id) = selected_id
-                    && let Some(index) = items.iter().position(|v| v["id"].as_str() == Some(&id))
-                {
-                    self.selection.select(Some(index));
-                }
                 if let Ok(target) = self
                     .settings
                     .target(self.org.as_deref(), self.project.as_deref())
                 {
+                    self.scope_repository_filter(&target);
                     self.repo_cache = Some((target, items.clone()));
                 }
-                self.set_screen(Screen::Repos(items));
+                self.show_repositories(items);
             }
             Message::Prs(items) => {
                 if let Ok(target) = self
@@ -1315,8 +1323,12 @@ impl App {
         Ok(())
     }
     fn refresh(&mut self) -> Result<()> {
-        if matches!(self.screen, Screen::Repos(_)) && self.pane_focus == 1 {
-            return self.refresh_repository();
+        if matches!(self.screen, Screen::Repos(_)) {
+            return if self.pane_focus == 1 {
+                self.refresh_repository()
+            } else {
+                self.reload_repositories()
+            };
         }
         self.pr_cache = None;
         self.pipeline_cache = None;
@@ -1344,6 +1356,9 @@ impl App {
         if let Event::Paste(paste) = &event {
             if let Some(form) = &mut self.form {
                 form.selected_field()?.value.push_str(&output::clean(paste));
+            } else if matches!(self.screen, Screen::Repos(_)) && self.repo_filter.editing {
+                self.repo_filter.query.push_str(&output::cell(paste));
+                self.apply_repository_filter()?;
             }
             return Ok(false);
         }
@@ -1446,6 +1461,9 @@ impl App {
                 KeyCode::Char('q') => return Ok(true),
                 _ => {}
             }
+            return Ok(false);
+        }
+        if self.handle_repository_filter(key)? {
             return Ok(false);
         }
         if key.code == KeyCode::Char('s')
@@ -2157,6 +2175,12 @@ fn pane_count(screen: &Screen, area: Rect, pr_tab: usize) -> usize {
 }
 
 fn command_hints(app: &App) -> Vec<(String, bool)> {
+    if matches!(app.screen, Screen::Repos(_)) && app.repo_filter.editing {
+        return ["Apply [Enter]", "Clear [Esc]", "Select [↑↓]"]
+            .into_iter()
+            .map(|hint| (hint.into(), true))
+            .collect();
+    }
     let hints: &[&str] = if app.help_scroll.is_some() {
         &["Close [Esc]"]
     } else if app.confirm.is_some() {
@@ -2226,17 +2250,18 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
                 "Refresh [F5]",
             ],
             Screen::Repos(_) if app.pane_focus == 0 => &[
+                "Filter [/]",
                 "Browser [b]",
                 "Editor [o]",
                 "Details [Enter]",
-                "Tabs [i/c/t]",
+                "Tabs [c/i/t]",
                 "Refresh [F5]",
             ],
-            Screen::Repos(_) if app.repository_view().is_some_and(|v| v.tab == 1) => &[
+            Screen::Repos(_) if app.repository_view().is_some_and(|v| v.tab == 0) => &[
                 "Commit [Enter]",
                 "Branch [r]",
                 "More [m]",
-                "Tabs [i/c/t]",
+                "Tabs [c/i/t]",
                 "Browser [b]",
                 "List [w]",
                 "Refresh [F5]",
@@ -2244,13 +2269,13 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
             Screen::Repos(_) if app.repository_view().is_some_and(|v| v.tab == 2) => &[
                 "Commit/Fold [Enter]",
                 "Fold [←/→]",
-                "Tabs [i/c/t]",
+                "Tabs [c/i/t]",
                 "Browser [b]",
                 "List [w]",
                 "Refresh [F5]",
             ],
             Screen::Repos(_) => &[
-                "Tabs [i/c/t]",
+                "Tabs [c/i/t]",
                 "Branch [r]",
                 "Browser [b]",
                 "Editor [o]",
@@ -2347,7 +2372,6 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
             [
                 "Pane [w/F6]",
                 "Pan [Shift+←→]",
-                "Sections [Tab/1/2/3]",
                 "Settings [s]",
                 "Help [h]",
                 "Quit [q]",
@@ -2577,7 +2601,8 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 "Tab / Shift+Tab switch sections; w or F6 changes pane.",
                 "Right enters details; Left returns to the list.",
                 "Use [ and ] or F7/F8 for PR and repository tabs.",
-                "Repository tabs: i Info, c Commits, t Tags.",
+                "Repository tabs: c Commits, i Info, t Tags.",
+                "Repository list: / filters names; Enter keeps it, Esc clears it.",
                 "PR tabs: d Description, c Comments, t Status, f Files.",
                 "PR comment: ? opens actions, then c adds a comment.",
                 "Repositories: r picks a branch; m loads more commits.",
@@ -3685,19 +3710,29 @@ mod tests {
     }
 
     #[test]
-    fn recent_refresh_keeps_selected_run_when_new_runs_arrive() -> Result<()> {
+    fn recent_refresh_caches_pipelines_and_keeps_selected_run_when_new_runs_arrive() -> Result<()> {
         let (_root, mut app) = fixture()?;
         app.screen = Screen::Recent(vec![json!({"id":42}), json!({"id":41})]);
         app.selection.select(Some(1));
         app.receive((
             app.generation,
-            Message::Recent(vec![json!({"id":43}), json!({"id":42}), json!({"id":41})]),
+            Message::Recent {
+                pipelines: vec![json!({"id":7})],
+                values: vec![json!({"id":43}), json!({"id":42}), json!({"id":41})],
+            },
         ));
+        let (target, pipelines) = app.pipeline_cache.as_ref().context("Pipeline cache")?;
+        assert_eq!(*target, app.settings.target(None, None)?);
+        assert_eq!(pipelines, &vec![json!({"id":7})]);
         assert_eq!(app.selection.selected(), Some(2));
         app.handle(key(KeyCode::Up))?;
         assert_eq!(app.selection.selected(), Some(1));
         app.enter()?;
         assert!(matches!(&app.screen, Screen::Watch(viewer) if viewer.run_id == 42));
+        app.activity_cache.insert(app.activity_key(7)?, vec![]);
+        app.load_all_pipelines()?;
+        assert!(matches!(&app.screen, Screen::Pipelines(items) if items.len() == 1));
+        assert!(app.task.is_none());
         Ok(())
     }
 

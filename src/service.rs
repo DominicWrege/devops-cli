@@ -11,6 +11,7 @@ use azure_core::http::{
     policies::{Policy, PolicyResult},
 };
 use azure_devops_rust_api::{self as ado, git::models as git};
+use futures_util::{StreamExt, TryStreamExt, stream};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -698,11 +699,11 @@ impl Service {
     }
 
     pub async fn pipeline_list(&self) -> Result<Vec<Value>> {
+        let client = self.pipelines(None);
         let mut all = Vec::new();
         let mut token = None;
         loop {
-            let mut request = self
-                .pipelines(None)
+            let mut request = client
                 .pipelines_client()
                 .list(self.org(), self.project())
                 .top(100);
@@ -712,12 +713,27 @@ impl Service {
             let response = send(request.send()).await?.into_raw_response();
             let next = continuation(&response);
             // The pipeline API can include designer pipelines. Verify configuration before exposing them.
-            for item in rows(&decode(response)?) {
-                let detail = self.pipeline(response_id(&item, "id")?).await?;
-                if detail["configuration"]["type"] == "yaml" {
-                    all.push(detail);
-                }
-            }
+            // Share the HTTP client and bound concurrent detail requests, preserving list order.
+            let details: Vec<Value> = stream::iter(rows(&decode(response)?))
+                .map(|item| {
+                    let client = &client;
+                    async move {
+                        let id = response_id(&item, "id")?;
+                        call!(
+                            client
+                                .pipelines_client()
+                                .get(self.org(), self.project(), id)
+                        )
+                    }
+                })
+                .buffered(8)
+                .try_collect()
+                .await?;
+            all.extend(
+                details
+                    .into_iter()
+                    .filter(|detail| detail["configuration"]["type"] == "yaml"),
+            );
             if next.is_none() || next == token {
                 break;
             }
@@ -1492,6 +1508,107 @@ mod tests {
             42
         );
         assert!(api(&server)?.recent_runs(&[]).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pipeline_list_pages_and_keeps_only_yaml_details_in_list_order() -> Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/org/project/_apis/pipelines"))
+            .and(query_param("$top", "100"))
+            .and(|request: &wiremock::Request| {
+                !request
+                    .url
+                    .query_pairs()
+                    .any(|(key, _)| key == "continuationToken")
+            })
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-ms-continuationtoken", "next")
+                    .set_body_json(json!({"value":[{"id":3},{"id":1}]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/org/project/_apis/pipelines"))
+            .and(query_param("continuationToken", "next"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[{"id":2}]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        for (id, kind) in [(3, "yaml"), (1, "designerJson"), (2, "yaml")] {
+            Mock::given(method("GET"))
+                .and(path(format!("/org/project/_apis/pipelines/{id}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    json!({"id":id,"name":format!("Pipeline {id}"),"configuration":{"type":kind}}),
+                ))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let items = api(&server)?.pipeline_list().await?;
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item["id"].as_i64())
+                .collect::<Vec<_>>(),
+            vec![Some(3), Some(2)]
+        );
+        assert_eq!(items[0]["name"], "Pipeline 3");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pipeline_details_load_concurrently_with_a_request_limit() -> Result<()> {
+        let server = MockServer::start().await;
+        mock_get(
+            &server,
+            "/org/project/_apis/pipelines",
+            json!({"value":(1..=10).map(|id| json!({"id":id})).collect::<Vec<_>>()}),
+        )
+        .await;
+        for id in 1..=10 {
+            Mock::given(method("GET"))
+                .and(path(format!("/org/project/_apis/pipelines/{id}")))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_delay(std::time::Duration::from_secs(60))
+                        .set_body_json(json!({"id":id,"configuration":{"type":"yaml"}})),
+                )
+                .mount(&server)
+                .await;
+        }
+        let api = api(&server)?;
+        let request = api.pipeline_list();
+        tokio::pin!(request);
+        let observe = async {
+            loop {
+                let requests = server
+                    .received_requests()
+                    .await
+                    .context("Recorded requests")?;
+                // The catalog request plus eight details must be in flight before any reply.
+                if requests.len() >= 9 {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    assert_eq!(
+                        server
+                            .received_requests()
+                            .await
+                            .context("Recorded requests")?
+                            .len(),
+                        9
+                    );
+                    return Ok::<(), anyhow::Error>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        };
+        tokio::select! {
+            result = &mut request => anyhow::bail!("Details completed before the concurrency check: {result:?}"),
+            result = tokio::time::timeout(std::time::Duration::from_secs(5), observe) => result??,
+        }
         Ok(())
     }
 

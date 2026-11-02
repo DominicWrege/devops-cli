@@ -34,6 +34,154 @@ fn setup(app: &mut App) -> Result<String> {
     Ok(key)
 }
 
+fn setup_filter(app: &mut App) {
+    app.screen = Screen::Repos(vec![]);
+    app.receive((
+        app.generation,
+        Message::Repos(vec![
+            json!({"id":"a","name":"api-core"}),
+            json!({"id":"b","name":"API-web"}),
+            json!({"id":"c","name":"web-app"}),
+        ]),
+    ));
+}
+
+#[test]
+fn repository_filter_preserves_selection_and_details_use_the_matching_repository() -> Result<()> {
+    let (_root, mut app) = super::super::tests::fixture()?;
+    setup_filter(&mut app);
+    app.handle(key(KeyCode::Down))?;
+    app.handle(key(KeyCode::Char('/')))?;
+    for ch in "API".chars() {
+        assert!(!app.handle(key(KeyCode::Char(ch)))?);
+    }
+    assert!(matches!(&app.screen, Screen::Repos(items) if items.len() == 2));
+    assert_eq!(app.repository()?.1["id"], "b");
+    assert_eq!(app.repo_cache.as_ref().context("Cache")?.1.len(), 3);
+    app.handle(key(KeyCode::Enter))?;
+    assert!(!app.repo_filter.editing);
+    app.handle(key(KeyCode::Char('i')))?;
+    assert_eq!(app.repository_view().context("View")?.tab, 1);
+    assert_eq!(app.external_selection()?.0["id"], "b");
+    app.handle(key(KeyCode::Left))?;
+    app.handle(key(KeyCode::Esc))?;
+    assert!(app.repo_filter.query.is_empty());
+    assert!(matches!(&app.screen, Screen::Repos(items) if items.len() == 3));
+    assert_eq!(app.repository()?.1["id"], "b");
+    assert!(app.task.is_none());
+    assert!(
+        !command_hints(&app)
+            .iter()
+            .any(|(hint, _)| hint == "Sections [Tab/1/2/3]")
+    );
+    Ok(())
+}
+
+#[test]
+fn repository_filter_handles_empty_results_paste_and_clear_at_all_widths() -> Result<()> {
+    let (_root, mut app) = super::super::tests::fixture()?;
+    setup_filter(&mut app);
+    app.handle(key(KeyCode::Char('/')))?;
+    for ch in "qhi".chars() {
+        assert!(!app.handle(key(KeyCode::Char(ch)))?);
+    }
+    assert!(app.help_scroll.is_none());
+    assert!(matches!(&app.screen, Screen::Repos(items) if items.is_empty()));
+    assert!(app.repository().is_err());
+    for (width, height) in [(15, 6), (40, 24), (120, 32)] {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))?;
+        terminal.draw(|frame| draw(frame, &mut app))?;
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("qhi"));
+        if width >= 40 {
+            assert!(rendered.contains("Filter: qhi"));
+            assert!(rendered.contains("No repositories match"));
+            assert!(rendered.contains("0 / 3"));
+        }
+    }
+    app.handle(Event::Key(event::KeyEvent::new(
+        KeyCode::Char('u'),
+        KeyModifiers::CONTROL,
+    )))?;
+    app.handle(Event::Paste("API".into()))?;
+    assert!(matches!(&app.screen, Screen::Repos(items) if items.len() == 2));
+    app.handle(key(KeyCode::Backspace))?;
+    assert_eq!(app.repo_filter.query, "AP");
+    app.handle(key(KeyCode::Esc))?;
+    assert!(!app.repo_filter.editing);
+    assert!(matches!(&app.screen, Screen::Repos(items) if items.len() == 3));
+    Ok(())
+}
+
+#[tokio::test]
+async fn repository_filter_can_be_entered_while_the_initial_list_is_loading() -> Result<()> {
+    let (_root, mut app) = super::super::tests::fixture()?;
+    app.screen = Screen::Repos(vec![]);
+    app.launch(std::future::pending());
+    let generation = app.generation;
+    app.handle(key(KeyCode::Char('/')))?;
+    app.handle(Event::Paste("API".into()))?;
+    assert!(app.task.is_some());
+    assert_eq!(app.generation, generation);
+    app.receive((
+        generation,
+        Message::Repos(vec![
+            json!({"id":"a","name":"api-core"}),
+            json!({"id":"b","name":"web-app"}),
+        ]),
+    ));
+    assert!(app.repo_filter.editing);
+    assert!(matches!(&app.screen, Screen::Repos(items) if items.len() == 1));
+    assert_eq!(app.repository()?.1["id"], "a");
+    Ok(())
+}
+
+#[tokio::test]
+async fn repository_filter_survives_refresh_and_sections_and_resets_for_another_project()
+-> Result<()> {
+    let (_root, mut app) = super::super::tests::fixture()?;
+    auth::pat::save(&app.store, "saved", "fixture-pat")?;
+    setup_filter(&mut app);
+    app.handle(key(KeyCode::Char('/')))?;
+    app.handle(Event::Paste("api".into()))?;
+    app.handle(key(KeyCode::Enter))?;
+    app.handle(key(KeyCode::Down))?;
+    app.handle(key(KeyCode::F(5)))?;
+    assert!(app.task.is_some());
+    app.cancel_task();
+    app.receive((
+        app.generation,
+        Message::Repos(vec![
+            json!({"id":"d","name":"api-new"}),
+            json!({"id":"b","name":"API-web"}),
+            json!({"id":"c","name":"web-app"}),
+        ]),
+    ));
+    assert_eq!(app.repository()?.1["id"], "b");
+    assert!(matches!(&app.screen, Screen::Repos(items) if items.len() == 2));
+    app.set_screen(Screen::Home);
+    app.load_repos()?;
+    assert_eq!(app.repo_filter.query, "api");
+    assert_eq!(app.repository()?.1["id"], "b");
+    app.settings.project = Some("another".into());
+    app.repo_cache = Some((
+        app.settings.target(None, None)?,
+        vec![json!({"id":"other","name":"Other"})],
+    ));
+    app.load_repos()?;
+    assert!(app.repo_filter.query.is_empty());
+    assert_eq!(app.repository()?.1["id"], "other");
+    assert!(app.task.is_none());
+    Ok(())
+}
+
 #[test]
 fn nested_paths_group_tags_by_commit_time_with_root_and_unknown_dates() {
     let values = vec![
@@ -62,6 +210,11 @@ fn nested_paths_group_tags_by_commit_time_with_root_and_unknown_dates() {
 fn tabs_folder_keys_and_branch_selection_preserve_each_history() -> Result<()> {
     let (_root, mut app) = super::super::tests::fixture()?;
     let id = setup(&mut app)?;
+    assert_eq!(app.repository_view().context("View")?.tab, 0);
+    assert_eq!(
+        app.repository_view().context("View")?.selected_commit(),
+        Some("new")
+    );
     app.handle(key(KeyCode::Char('c')))?;
     assert_eq!(app.pane_focus, 1);
     app.handle(key(KeyCode::Down))?;
@@ -87,6 +240,12 @@ fn tabs_folder_keys_and_branch_selection_preserve_each_history() -> Result<()> {
     assert_eq!(
         app.repository_view().context("View")?.selected_commit(),
         Some("new")
+    );
+    app.handle(key(KeyCode::F(7)))?;
+    assert_eq!(app.repository_view().context("View")?.tab, 1);
+    assert_eq!(
+        app.repository_view().context("View")?.selected_commit(),
+        None
     );
     app.handle(key(KeyCode::F(7)))?;
     assert_eq!(
@@ -123,7 +282,7 @@ fn tabs_folder_keys_and_branch_selection_preserve_each_history() -> Result<()> {
     assert_eq!(view.histories["main"].selection.selected(), Some(1));
     assert!(app.task.is_none());
     for (code, tab) in [
-        (KeyCode::Char('i'), 0),
+        (KeyCode::Char('i'), 1),
         (KeyCode::Char('t'), 2),
         (KeyCode::Char('['), 1),
         (KeyCode::Char(']'), 2),
@@ -141,7 +300,7 @@ async fn refresh_keeps_rows_and_identity_and_ignores_canceled_replies() -> Resul
     let (_root, mut app) = super::super::tests::fixture()?;
     auth::pat::save(&app.store, "saved", "fixture-pat")?;
     let id = setup(&mut app)?;
-    app.handle(key(KeyCode::F(8)))?;
+    app.handle(key(KeyCode::Char('c')))?;
     app.handle(key(KeyCode::Down))?;
     app.handle(key(KeyCode::F(5)))?;
     let generation = app.generation;
@@ -236,7 +395,7 @@ async fn refresh_keeps_rows_and_identity_and_ignores_canceled_replies() -> Resul
 fn commit_files_diffs_and_escape_stay_with_the_selected_commit() -> Result<()> {
     let (_root, mut app) = super::super::tests::fixture()?;
     let id = setup(&mut app)?;
-    app.handle(key(KeyCode::F(8)))?;
+    app.handle(key(KeyCode::Char('c')))?;
     app.receive_repository(
         id.clone(),
         Reply::Changes(
@@ -270,7 +429,7 @@ fn commit_files_diffs_and_escape_stay_with_the_selected_commit() -> Result<()> {
     assert_eq!(app.pane_y[1], 0);
     app.handle(key(KeyCode::Esc))?;
     assert!(app.repository_view().context("View")?.detail.is_none());
-    assert_eq!(app.repository_view().context("View")?.tab, 1);
+    assert_eq!(app.repository_view().context("View")?.tab, 0);
     assert_eq!(app.pane_focus, 1);
     app.handle(key(KeyCode::Esc))?;
     assert_eq!(app.pane_focus, 0);
@@ -281,7 +440,7 @@ fn commit_files_diffs_and_escape_stay_with_the_selected_commit() -> Result<()> {
 fn history_tags_and_commit_diffs_render_at_narrow_and_wide_sizes() -> Result<()> {
     let (_root, mut app) = super::super::tests::fixture()?;
     let id = setup(&mut app)?;
-    for tab in [1, 2] {
+    for tab in [0, 2] {
         app.repository_view_mut()?.tab = tab;
         for width in [40, 80, 120] {
             let mut terminal =
@@ -290,12 +449,11 @@ fn history_tags_and_commit_diffs_render_at_narrow_and_wide_sizes() -> Result<()>
             let buffer = terminal.backend().buffer();
             let text: String = buffer.content.iter().map(|c| c.symbol()).collect();
             assert!(text.contains("Commits") && text.contains("Tags"));
-            assert!(
-                text.contains("Info [i]")
-                    && text.contains("Commits [c]")
-                    && text.contains("Tags [t]")
-            );
-            assert!(text.contains(if tab == 1 { "Newest change" } else { "2.6.1" }));
+            let commits_tab = text.find("Commits [c]").context("Commits tab")?;
+            let info_tab = text.find("Info [i]").context("Info tab")?;
+            let tags_tab = text.find("Tags [t]").context("Tags tab")?;
+            assert!(commits_tab < info_tab && info_tab < tags_tab);
+            assert!(text.contains(if tab == 0 { "Newest change" } else { "2.6.1" }));
             assert!(!text.contains("not loaded"));
         }
     }

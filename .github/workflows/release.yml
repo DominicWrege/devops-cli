@@ -109,17 +109,17 @@ jobs:
           \`mise use -g github:$GH_REPO@$VERSION\`
 
           Start setup with \`devops login\`. Enter your organization and a personal access token at the masked prompt; no Entra app registration is required. Entra sign-in remains available with \`--entra\`.
-          Version 0.4.2 adds repository commit history, grouped tags, and direct shortcuts for repository and PR review tabs.
+          Version 0.4.3 adds repository filtering and improves pipeline list loading.
 
-          - In Repositories, press i for Info, c for Commits, or t for Tags. Commits are newest first and grouped by day; m loads older commits from the same snapshot.
-          - Tags and the branch picker group slash-separated names into collapsible folders, including nested paths such as fix/2.6.1. Tags sort newest first within each folder by target commit date.
-          - Press r to select a branch. Each repository and branch keeps its loaded history and selection for the session.
-          - Select a commit or tag and press Enter for changed files, then Enter on a file for its diff. Root commits are supported; merge diffs compare against the first parent.
-          - PR review tabs now use d for Description, c for Comments, t for Status, and f for Files. To add a comment, press ? then c.
-          - The existing [ and ] and F7/F8 cycling shortcuts still work. Press b to open the selected commit in the browser.
+          - Press / in the repository list to filter names as you type, without extra API calls. Matching ignores case. Enter keeps the filter; Esc clears it.
+          - Repository filters preserve matching selections, survive refreshes and section switches, and reset when you change projects.
+          - Repository details now open Commits first, followed by Info and Tags. The c/i/t shortcuts and bracket/function-key cycling follow this order.
+          - Pipeline details load with up to eight concurrent requests through a shared HTTP client, preserving pagination and YAML-only filtering.
+          - Recent Runs reuses the pipeline catalog for automatic refreshes and the All Pipelines list.
+          - Removed the redundant Sections shortcut hint from the footer. Section switching remains available through Tab and 1/2/3.
 
           Text diffs are limited to 1 MiB per side. Binary files and submodules direct you to the browser.
-          Live tenant history, tag and merge-diff responses, and desktop browser/editor handoff remain unverified; mock API and TUI tests cover these changes.
+          Live tenant loading speed has not been benchmarked. Live tenant behavior and local Linux/WSL integration were not retested for this patch; mock API and TUI tests cover these changes.
 
           Linux uses a static musl binary, with no glibc requirement. ARM64 and macOS builds are not provided.
           Live tenant authentication acceptance is still required. See the README and docs/acceptance.md.

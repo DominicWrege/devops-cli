@@ -2,6 +2,22 @@
 
 No live Azure DevOps writes have been run by the implementation session. Use an explicitly approved disposable repository, PR, and pipeline for these checks.
 
+## 0.4.3 verification
+
+Local Windows checks cover 130 passing Rust tests (one credential-dependent test
+ignored), formatting, Clippy, and five release-packaging tests. Repository tests
+cover live name filtering, case-insensitive matching, empty results, pasted input,
+selection preservation, filtered detail actions, filtering during the initial
+load, refreshes, section switches, and project isolation. Repository tabs now
+open Commits first, followed by Info and Tags.
+
+Mock API tests verify that pipeline details load with up to eight concurrent
+requests while preserving pagination, YAML-only filtering, and list order.
+Recent Runs caches the pipeline catalog for automatic refreshes and the All
+Pipelines list. Live tenant loading times have not been benchmarked. Live tenant
+acceptance and local Linux/WSL behavior were not retested for this patch; CI
+checks the Windows and Linux musl builds.
+
 ## 0.4.2 verification
 
 Automated checks cover branch-history pagination, peeled annotated tags,

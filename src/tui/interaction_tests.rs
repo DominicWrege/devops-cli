@@ -191,7 +191,13 @@ async fn three_sections_cycle_in_order_and_number_keys_switch_during_reads() -> 
     let generation = app.generation;
     app.handle(key(KeyCode::Char('3')))?;
     assert!(matches!(app.screen, Screen::Repos(_)));
-    app.receive((generation, Message::Recent(vec![])));
+    app.receive((
+        generation,
+        Message::Recent {
+            pipelines: vec![],
+            values: vec![],
+        },
+    ));
     assert!(matches!(app.screen, Screen::Repos(_)));
     app.launch(std::future::pending());
     app.writing = true;
@@ -219,7 +225,7 @@ async fn repositories_preserve_selection_refresh_and_respect_project_cache_scope
     assert_eq!(app.selection.selected(), Some(1));
     assert!(app.task.is_none());
     app.refresh()?;
-    assert!(app.repo_cache.is_none());
+    assert!(app.repo_cache.is_some());
     assert!(matches!(&app.screen, Screen::Repos(items) if items.len() == 2));
     app.cancel_task();
     app.receive((
@@ -245,6 +251,7 @@ fn repositories_render_three_tabs_and_navigate_details_at_both_widths() -> Resul
     app.screen = Screen::Repos(vec![
         json!({"id":"repo-id","name":"devops-cli","defaultBranch":"refs/heads/main","remoteUrl":"https://example.test/devops-cli","sshUrl":"git@example.test:devops-cli","webUrl":"https://example.test/browse"}),
     ]);
+    app.handle(key(KeyCode::Char('i')))?;
     for width in [40, 80, 120] {
         let buffer = render(&mut app, width, 30)?;
         let rendered = contents(&buffer);
