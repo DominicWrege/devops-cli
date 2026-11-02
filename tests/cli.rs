@@ -33,6 +33,7 @@ fn missing_acknowledgement_fails_before_authentication() -> anyhow::Result<()> {
         vec!["pr", "merge", "7", "--strategy", "squash"],
         vec!["pr", "abandon", "7"],
         vec!["pipeline", "cancel", "9"],
+        vec!["tag", "delete", "v1", "--repo", "repo"],
     ] {
         command(home.path())
             .args(args)
@@ -119,6 +120,66 @@ fn invalid_repository_names_fail_before_authentication() -> anyhow::Result<()> {
             .code(2)
             .stdout("")
             .stderr(predicate::str::contains("Repository"));
+    }
+    Ok(())
+}
+
+#[test]
+fn tag_commands_validate_before_authentication() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let sha = "1111111111111111111111111111111111111111";
+    for args in [
+        vec![
+            "tag", "create", "bad..tag", "--repo", "repo", "--target", sha,
+        ],
+        vec![
+            "tag", "create", "v1", "--repo", "repo", "--target", "abc1234",
+        ],
+        vec!["tag", "create", "v1", "--repo", "../repo", "--target", sha],
+        vec!["tag", "delete", "bad..tag", "--repo", "repo", "--yes"],
+        vec!["tag", "delete", "v1", "--repo", "../repo", "--yes"],
+        vec!["tag", "create", "v1", "--repo", "repo"],
+        vec!["tag", "create", "v1", "--target", sha],
+        vec!["tag", "delete", "v1", "--yes"],
+    ] {
+        command(home.path())
+            .args(args)
+            .assert()
+            .code(2)
+            .stdout("")
+            .stderr(predicate::str::contains("Missing organization").not());
+    }
+    command(home.path())
+        .args(["init", "--org", "org", "--project", "project"])
+        .assert()
+        .success();
+    for args in [
+        vec![
+            "tag",
+            "create",
+            "release/v1",
+            "-R",
+            "repo",
+            "--target",
+            sha,
+            "--json",
+        ],
+        vec![
+            "--json",
+            "tag",
+            "delete",
+            "refs/tags/release/v1",
+            "-R",
+            "repo",
+            "--yes",
+        ],
+    ] {
+        command(home.path())
+            .args(args)
+            .assert()
+            .code(3)
+            .stdout("")
+            .stderr(predicate::str::contains("DEVOPS_PAT"));
     }
     Ok(())
 }

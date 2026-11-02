@@ -971,7 +971,7 @@ pub(super) fn render(frame: &mut Frame, area: Rect, app: &mut App, repos: &[Valu
         return;
     }
     let panes = if area.width >= 90 {
-        Layout::horizontal([Constraint::Percentage(25), Constraint::Percentage(75)]).split(area)
+        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(area)
     } else {
         Layout::vertical([
             Constraint::Length(if area.height >= 22 { 7 } else { 5 }),

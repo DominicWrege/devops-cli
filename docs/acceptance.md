@@ -2,6 +2,21 @@
 
 No live Azure DevOps writes have been run by the implementation session. Use an explicitly approved disposable repository, PR, and pipeline for these checks.
 
+## 0.4.5 verification
+
+Local Windows checks cover 146 passing Rust tests (one credential-dependent test
+ignored), formatting, Clippy, and five release-packaging tests. Mock API tests
+cover CLI tag creation, exact-name lookup across paginated refs, annotated and
+lightweight tag deletion using the unpeeled object ID, and rejecting missing
+tags or invalid objects before writes. CLI process tests cover required flags,
+validation before authentication, deletion acknowledgement, -R, and --json.
+
+The repository list now uses 40% of wide terminals instead of 25%. Existing TUI
+rendering and navigation checks pass at narrow and wide terminal sizes.
+
+Live Azure DevOps tag writes and local Linux/WSL integration remain untested for
+this patch. CI checks Windows, Linux musl, Rust 1.88, and release installation.
+
 ## 0.4.4 verification
 
 Local Windows checks cover 141 passing Rust tests (one credential-dependent test

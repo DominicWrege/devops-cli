@@ -2,11 +2,176 @@ use super::*;
 use crate::service::tests::api;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{method, path},
+    matchers::{body_json, method, path, query_param},
 };
 
 const COMMIT: &str = "1111111111111111111111111111111111111111";
 const ANNOTATED: &str = "2222222222222222222222222222222222222222";
+
+#[tokio::test]
+async fn cli_create_sends_a_single_ref_update_and_returns_confirmation() -> Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/org/project/_apis/git/repositories/repo/refs"))
+        .and(body_json(json!([{
+            "name":"refs/tags/release/v1", "oldObjectId":ZERO, "newObjectId":COMMIT
+        }])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[{
+            "name":"refs/tags/release/v1", "success":true, "updateStatus":"succeeded"
+        }]})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let message = api(&server)?
+        .tag_action(&TagCommand::Create {
+            name: "refs/tags/release/v1".into(),
+            repo: "repo".into(),
+            target: COMMIT.into(),
+        })
+        .await?;
+    assert_eq!(message, "Created tag release/v1");
+    assert_eq!(
+        server.received_requests().await.context("Requests")?.len(),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cli_delete_pages_for_the_exact_tag_and_uses_the_unpeeled_object() -> Result<()> {
+    for object in [COMMIT, ANNOTATED] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/org/project/_apis/git/repositories/repo/refs"))
+            .and(query_param("filter", "tags/release/v1"))
+            .and(query_param("peelTags", "false"))
+            .respond_with(move |request: &wiremock::Request| {
+                let next = request
+                    .url
+                    .query_pairs()
+                    .any(|(key, value)| key == "continuationToken" && value == "next page");
+                if next {
+                    ResponseTemplate::new(200).set_body_json(json!({"value":[{
+                        "name":"refs/tags/release/v1", "objectId":object, "peeledObjectId":COMMIT
+                    }]}))
+                } else {
+                    ResponseTemplate::new(200)
+                        .insert_header("x-ms-continuationtoken", "next page")
+                        .set_body_json(json!({"value":[{
+                            "name":"refs/tags/release/v10", "objectId":COMMIT
+                        }]}))
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/org/project/_apis/git/repositories/repo/refs"))
+            .and(body_json(json!([{
+                "name":"refs/tags/release/v1", "oldObjectId":object, "newObjectId":ZERO
+            }])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[{
+                "name":"refs/tags/release/v1", "success":true, "updateStatus":"succeeded"
+            }]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let message = api(&server)?
+            .tag_action(&TagCommand::Delete {
+                name: "release/v1".into(),
+                repo: "repo".into(),
+                yes: true,
+            })
+            .await?;
+        assert_eq!(message, "Deleted tag release/v1");
+        assert_eq!(
+            server.received_requests().await.context("Requests")?.len(),
+            3
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cli_delete_never_writes_for_a_missing_tag_or_invalid_object() -> Result<()> {
+    for tag in [
+        json!({"name":"refs/tags/v10", "objectId":COMMIT}),
+        json!({"name":"refs/tags/v1", "objectId":ZERO}),
+        json!({"name":"refs/tags/v1"}),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(query_param("filter", "tags/v1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value":[tag]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = api(&server)?
+            .tag_action(&TagCommand::Delete {
+                name: "v1".into(),
+                repo: "repo".into(),
+                yes: true,
+            })
+            .await
+            .err()
+            .context("Must reject missing tag/object")?;
+        assert!(
+            error
+                .to_string()
+                .contains(if tag["name"] == "refs/tags/v10" {
+                    "Tag v1 not found"
+                } else {
+                    "40-character"
+                })
+        );
+        assert_eq!(
+            server.received_requests().await.context("Requests")?.len(),
+            1
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cli_tag_validation_prevents_all_requests() -> Result<()> {
+    let server = MockServer::start().await;
+    let api = api(&server)?;
+    for command in [
+        TagCommand::Create {
+            name: "v1".into(),
+            repo: "repo".into(),
+            target: "short".into(),
+        },
+        TagCommand::Delete {
+            name: "v1".into(),
+            repo: "repo".into(),
+            yes: false,
+        },
+        TagCommand::Delete {
+            name: "bad..tag".into(),
+            repo: "repo".into(),
+            yes: true,
+        },
+    ] {
+        let error = api
+            .tag_action(&command)
+            .await
+            .err()
+            .context("Invalid command")?;
+        assert_eq!(
+            error.downcast_ref::<error::Failure>().map(|e| e.code),
+            Some(2)
+        );
+    }
+    assert!(
+        server
+            .received_requests()
+            .await
+            .context("Requests")?
+            .is_empty()
+    );
+    Ok(())
+}
 
 #[test]
 fn tag_names_and_targets_are_validated_without_a_local_checkout() -> Result<()> {

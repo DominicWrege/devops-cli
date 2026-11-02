@@ -325,6 +325,21 @@ devops repo create new-repo
 repository objects, including IDs. `repo create` creates an empty remote
 repository and prints its URL. It makes no local Git changes or initial commit.
 
+### Tags
+
+```sh
+devops tag create v1.0.0 --repo my-repo --target 0123456789abcdef0123456789abcdef01234567
+devops tag delete v1.0.0 --repo my-repo --yes
+```
+
+`--repo` (or `-R`) accepts a repository name or UUID in the selected project.
+Tag names accept paths such as `release/v1.0.0` and the `refs/tags/` prefix.
+Creation requires a full, nonzero 40-character commit/object SHA and creates a
+lightweight remote tag. Deletion requires `--yes` and uses the tag's current
+object ID to reject concurrent changes. Both commands support `--json` and make
+no local Git changes. Tag changes require the corresponding repository
+permissions and **Code: Read & write** for PAT authentication.
+
 ### Defaults and overrides
 
 ```sh
@@ -353,7 +368,7 @@ For Entra sign-in, Linux/WSL stores an unencrypted session in `~/.config/devops/
 
 ### Writes and errors
 
-Merge, abandon, and cancel require `--yes`. Trigger, rerun, and retry do not, even if the pipeline can deploy.
+Merge, abandon, cancel, and tag deletion require `--yes`. Trigger, rerun, and retry do not, even if the pipeline can deploy.
 
 Writes are not retried automatically. If a request fails or is interrupted, check the resource before repeating it. A PR edit that changes several reviewers can partly succeed.
 

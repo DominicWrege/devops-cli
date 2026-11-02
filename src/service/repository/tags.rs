@@ -92,6 +92,42 @@ impl TagChange {
 }
 
 impl Service {
+    pub async fn tag_action(&self, command: &TagCommand) -> Result<String> {
+        command.validate()?;
+        let (repo, change) = match command {
+            TagCommand::Create { name, repo, target } => (
+                repo,
+                TagChange::Create {
+                    name: name.clone(),
+                    target: target.clone(),
+                },
+            ),
+            TagCommand::Delete { name, repo, .. } => {
+                let name = tag_name(name)?;
+                // Azure DevOps filters by prefix. Match the full name and retain the
+                // unpeeled object ID so annotated tags and concurrent updates are safe.
+                let refs = self
+                    .repo_refs_filtered(repo, name.strip_prefix("refs/").context("Tag ref")?, false)
+                    .await?;
+                let tag = refs
+                    .iter()
+                    .find(|tag| text(tag, "name") == name)
+                    .with_context(|| {
+                        format!("Tag {} not found", name.trim_start_matches("refs/tags/"))
+                    })?;
+                (
+                    repo,
+                    TagChange::Delete {
+                        name,
+                        object: text(tag, "objectId").into(),
+                    },
+                )
+            }
+        };
+        self.repo_change_tag(repo, &change).await?;
+        Ok(change.message())
+    }
+
     async fn update_tag_ref(&self, repo: &str, name: &str, old: &str, new: &str) -> Result<()> {
         let name = tag_name(name)?;
         let value = call!(self.git().refs_client().update_refs(
