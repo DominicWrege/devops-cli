@@ -43,7 +43,9 @@ pub fn segment(value: &str) -> String {
     utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
 }
 
+mod repository;
 mod review;
+pub(crate) use repository::{commit_date, ref_commit};
 pub fn branch(value: &str) -> String {
     if value.starts_with("refs/") {
         value.into()
@@ -1136,7 +1138,7 @@ mod tests {
             ))
         }
     }
-    fn api(server: &MockServer) -> Result<Service> {
+    pub(super) fn api(server: &MockServer) -> Result<Service> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let endpoint: azure_core::http::Url = server.uri().parse()?;
         Ok(Service {

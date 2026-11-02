@@ -33,6 +33,7 @@ use tokio::{sync::mpsc, task::JoinHandle};
 mod chrome;
 #[cfg(test)]
 mod interaction_tests;
+mod repositories;
 mod review;
 use chrome::{command_rows, draw_commands, draw_header, pane_block, popup, selection_style};
 
@@ -82,6 +83,10 @@ enum Message {
     Projects(Vec<Value>),
     Prs(Vec<Value>),
     Repos(Vec<Value>),
+    Repository {
+        key: String,
+        reply: repositories::Reply,
+    },
     Pr {
         value: Value,
     },
@@ -277,6 +282,7 @@ struct App {
     pr_cache: Option<(Target, bool, Vec<Value>)>,
     pipeline_cache: Option<(Target, Vec<Value>)>,
     repo_cache: Option<(Target, Vec<Value>)>,
+    repo_views: std::collections::HashMap<String, repositories::View>,
     activity_cache: std::collections::HashMap<String, Vec<Value>>,
     pr_selection: usize,
     pipeline_selection: usize,
@@ -352,6 +358,7 @@ impl App {
             pr_cache: None,
             pipeline_cache: None,
             repo_cache: None,
+            repo_views: std::collections::HashMap::new(),
             activity_cache: std::collections::HashMap::new(),
             pr_selection: 0,
             pipeline_selection: 0,
@@ -911,6 +918,7 @@ impl App {
         self.writing = false;
         self.status = String::new();
         match message {
+            Message::Repository { key, reply } => self.receive_repository(key, reply),
             Message::Organizations(items) => self.set_screen(Screen::Organizations(items)),
             Message::Projects(items) => {
                 self.save_picker_view();
@@ -1307,6 +1315,9 @@ impl App {
         Ok(())
     }
     fn refresh(&mut self) -> Result<()> {
+        if matches!(self.screen, Screen::Repos(_)) && self.pane_focus == 1 {
+            return self.refresh_repository();
+        }
         self.pr_cache = None;
         self.pipeline_cache = None;
         self.activity_cache.clear();
@@ -1470,6 +1481,9 @@ impl App {
         {
             return Ok(false);
         }
+        if matches!(self.screen, Screen::Repos(_)) && self.handle_repository(key)? {
+            return Ok(false);
+        }
         if matches!(key.code, KeyCode::F(6) | KeyCode::Char('w')) {
             let panes = pane_count(&self.screen, self.viewport, self.pr_tab);
             self.pane_focus = (self.pane_focus + 1) % panes;
@@ -1504,9 +1518,28 @@ impl App {
                 }
             }
             match key.code {
-                KeyCode::Char('[' | ']') | KeyCode::F(7) | KeyCode::F(8) => {
-                    let next = matches!(key.code, KeyCode::Char(']') | KeyCode::F(8));
-                    self.pr_tab = (self.pr_tab + if next { 1 } else { 3 }) % 4;
+                KeyCode::Char('d' | 'c' | 't' | 'f' | '[' | ']')
+                | KeyCode::F(7)
+                | KeyCode::F(8)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    self.pr_tab = match key.code {
+                        KeyCode::Char('d') => 0,
+                        KeyCode::Char('c') => 1,
+                        KeyCode::Char('t') => 2,
+                        KeyCode::Char('f') => 3,
+                        _ => {
+                            (self.pr_tab
+                                + if matches!(key.code, KeyCode::Char(']') | KeyCode::F(8)) {
+                                    1
+                                } else {
+                                    3
+                                })
+                                % 4
+                        }
+                    };
                     self.pane_focus = usize::from(self.viewport.width >= 90);
                     if self.pr_tab == 3 {
                         self.pane_focus = 0;
@@ -1762,11 +1795,6 @@ impl App {
                 ) =>
             {
                 self.open_external(action == 'o')?;
-            }
-            KeyCode::Char('d') if matches!(self.screen, Screen::Pr { .. }) => {
-                self.pr_tab = 3;
-                self.pane_focus = 0;
-                self.load_changes()?;
             }
             KeyCode::Enter if matches!(self.screen, Screen::Pr { .. }) && self.pr_tab == 3 => {
                 self.load_diff()?;
@@ -2043,7 +2071,7 @@ fn render_pr(
         }
     }
     if comments.is_empty() {
-        comments = "No comments yet. Press c to add a comment.".into();
+        comments = "No comments yet. Press ? then c to add a comment.".into();
     }
     let description = text(pr, "description");
     let body = match tab {
@@ -2055,11 +2083,14 @@ fn render_pr(
             description
         })),
     };
-    let title = match tab {
-        1 => "F7/F8: Description | [Comments] | Status | Files",
-        2 => "F7/F8: Description | Comments | [Status] | Files",
-        _ => "F7/F8: [Description] | Comments | Status | Files",
-    };
+    let title = pr_tabs(
+        tab,
+        if wide {
+            columns[1].width
+        } else {
+            regions[1].width
+        },
+    );
     frame.render_widget(
         Paragraph::new(body)
             .wrap(Wrap { trim: false })
@@ -2090,6 +2121,29 @@ fn section_index(screen: &Screen) -> Option<usize> {
         Screen::Repos(_) => Some(2),
         _ => None,
     }
+}
+
+fn pr_tabs(tab: usize, width: u16) -> Line<'static> {
+    let labels = if width >= 60 {
+        ["Description [d]", "Comments [c]", "Status [t]", "Files [f]"]
+    } else {
+        ["Desc [d]", "Chat [c]", "State [t]", "Files [f]"]
+    };
+    let mut spans = Vec::new();
+    for (index, label) in labels.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(if width >= 60 { " | " } else { " " }));
+        }
+        spans.push(Span::styled(
+            label,
+            if tab == index {
+                Style::default().fg(Color::Cyan).underlined()
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ));
+    }
+    Line::from(spans)
 }
 
 fn pane_count(screen: &Screen, area: Rect, pr_tab: usize) -> usize {
@@ -2158,14 +2212,51 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
                 "Detail [→]",
                 "Refresh [F5]",
             ],
+            Screen::Repos(_) if app.repository_view().is_some_and(|v| v.detail.is_some()) => &[
+                "Diff [Enter]",
+                "Files/Diff [w]",
+                "Browser [b]",
+                "Back [Esc]",
+                "Refresh [F5]",
+            ],
+            Screen::Repos(_) if app.repository_view().is_some_and(|v| v.picking_branch) => &[
+                "Choose [Enter]",
+                "Fold [←/→]",
+                "Cancel [Esc]",
+                "Refresh [F5]",
+            ],
             Screen::Repos(_) if app.pane_focus == 0 => &[
                 "Browser [b]",
                 "Editor [o]",
                 "Details [Enter]",
-                "Detail pane [→]",
+                "Tabs [i/c/t]",
                 "Refresh [F5]",
             ],
-            Screen::Repos(_) => &["Browser [b]", "Editor [o]", "List [←]", "Refresh [F5]"],
+            Screen::Repos(_) if app.repository_view().is_some_and(|v| v.tab == 1) => &[
+                "Commit [Enter]",
+                "Branch [r]",
+                "More [m]",
+                "Tabs [i/c/t]",
+                "Browser [b]",
+                "List [w]",
+                "Refresh [F5]",
+            ],
+            Screen::Repos(_) if app.repository_view().is_some_and(|v| v.tab == 2) => &[
+                "Commit/Fold [Enter]",
+                "Fold [←/→]",
+                "Tabs [i/c/t]",
+                "Browser [b]",
+                "List [w]",
+                "Refresh [F5]",
+            ],
+            Screen::Repos(_) => &[
+                "Tabs [i/c/t]",
+                "Branch [r]",
+                "Browser [b]",
+                "Editor [o]",
+                "List [←]",
+                "Refresh [F5]",
+            ],
             Screen::Prs(_) => &[
                 "Open [Enter]",
                 "Browser [b]",
@@ -2178,7 +2269,7 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
             Screen::Pr { .. } if app.pr_tab == 3 => &[
                 "Diff [Enter]",
                 "Files/Diff [w]",
-                "Tabs [F7/F8]",
+                "Tabs [d/c/t/f]",
                 "Approve [v]",
                 "Browser [b]",
                 "Editor [o]",
@@ -2187,8 +2278,8 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
                 "Refresh [F5]",
             ],
             Screen::Pr { .. } => &[
-                "Tabs [F7/F8]",
-                "Files [d]",
+                "Tabs [d/c/t/f]",
+                "Files [f]",
                 "Approve [v]",
                 "Browser [b]",
                 "Editor [o]",
@@ -2485,7 +2576,14 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 "",
                 "Tab / Shift+Tab switch sections; w or F6 changes pane.",
                 "Right enters details; Left returns to the list.",
-                "Use [ and ] for PR detail tabs, Shift+arrows to pan.",
+                "Use [ and ] or F7/F8 for PR and repository tabs.",
+                "Repository tabs: i Info, c Commits, t Tags.",
+                "PR tabs: d Description, c Comments, t Status, f Files.",
+                "PR comment: ? opens actions, then c adds a comment.",
+                "Repositories: r picks a branch; m loads more commits.",
+                "Tags/branches: Enter toggles folders; arrows fold them.",
+                "Commit: Enter opens files; Enter on a file loads its diff.",
+                "Use Shift+arrows to pan long lines.",
                 "Forms: Tab changes fields. Ctrl+U clears a field.",
                 "Enter inserts a line in Description and Comment.",
                 "Ctrl+S submits; Enter also submits single-line fields.",
@@ -2540,48 +2638,8 @@ fn draw_screen(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     match &mut app.screen {
         Screen::Repos(items) => {
-            let panes = if area.width >= 90 {
-                Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-                    .split(area)
-            } else {
-                Layout::vertical([Constraint::Percentage(40), Constraint::Percentage(60)])
-                    .split(area)
-            };
-            let details = items.get(app.selection.selected().unwrap_or(0)).map(|repo| {
-                let branch = text(repo, "defaultBranch").trim_start_matches("refs/heads/");
-                format!("{}\n\nDefault branch: {}\nStatus: {}\nID: {}\n\nHTTPS clone\n{}\n\nSSH clone\n{}\n\nWeb\n{}",
-                    text(repo, "name"), if branch.is_empty() { "Not set" } else { branch },
-                    if repo["isDisabled"] == true { "Disabled" } else { "Enabled" }, text(repo, "id"),
-                    text(repo, "remoteUrl"), text(repo, "sshUrl"), text(repo, "webUrl"))
-            }).unwrap_or_else(|| if app.task.is_some() { "Loading repositories...".into() } else { "No repositories in this project. Press F5 to refresh.".into() });
-            draw_list(
-                frame,
-                panes[0],
-                pane_block("Repositories", app.pane_focus == 0),
-                items
-                    .iter()
-                    .map(|repo| {
-                        format!(
-                            "{}{}",
-                            text(repo, "name"),
-                            if repo["isDisabled"] == true {
-                                " (disabled)"
-                            } else {
-                                ""
-                            }
-                        )
-                    })
-                    .collect(),
-                &mut app.selection,
-                app.pane_x[0],
-            );
-            frame.render_widget(
-                Paragraph::new(output::clean(&details))
-                    .wrap(Wrap { trim: false })
-                    .scroll((app.detail_scroll, app.pane_x[1]))
-                    .block(pane_block("Repository details", app.pane_focus == 1)),
-                panes[1],
-            );
+            let items = items.clone();
+            repositories::render(frame, area, app, &items);
         }
         Screen::Home => {
             frame.render_widget(Paragraph::new("Your project is remembered between sessions.\n\n1  Pipelines         Browse runs and follow logs\n2  Pull requests     Review and manage your team's work\n3  Repositories      Browse repositories and clone URLs\ns  Settings          Current project and account\nq  Quit\n\nUse Tab to cycle pipelines, pull requests, and repositories.\nSelect a row with Up/Down or j/k; press Enter to open it.").block(pane_block("Home", true)),area);

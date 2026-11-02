@@ -38,7 +38,7 @@ fn review_tabs_files_and_diffs_remain_usable_at_both_widths() -> Result<()> {
         app.pane_focus = 0;
         let buffer = render(&mut app, width, 30)?;
         let rendered = contents(&buffer);
-        assert!(rendered.contains("F7/F8"));
+        assert!(rendered.contains("Files [f]"));
         assert!(rendered.contains("first.rs"));
         assert!(rendered.contains("+new"));
         assert!(
@@ -63,7 +63,23 @@ fn review_tabs_files_and_diffs_remain_usable_at_both_widths() -> Result<()> {
     }
     app.handle(key(KeyCode::F(8)))?;
     assert_eq!(app.pr_tab, 0);
+    app.handle(key(KeyCode::Char('f')))?;
+    assert_eq!(app.pr_tab, 3);
     app.handle(key(KeyCode::Char('d')))?;
+    assert_eq!(app.pr_tab, 0);
+    app.handle(key(KeyCode::Char('c')))?;
+    assert_eq!(app.pr_tab, 1);
+    assert!(app.form.is_none());
+    app.handle(key(KeyCode::Char('?')))?;
+    app.handle(key(KeyCode::Char('c')))?;
+    assert!(matches!(
+        app.form.as_ref().map(|f| &f.kind),
+        Some(FormKind::Comment(7))
+    ));
+    app.handle(key(KeyCode::Esc))?;
+    app.handle(key(KeyCode::Char('t')))?;
+    assert_eq!(app.pr_tab, 2);
+    app.handle(key(KeyCode::Char('f')))?;
     assert_eq!(app.pr_tab, 3);
     app.handle(key(KeyCode::Char('v')))?;
     assert!(matches!(app.confirm, Some(PrCommand::Review { id: 7, .. })));

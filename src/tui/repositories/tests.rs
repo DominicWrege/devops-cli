@@ -1,0 +1,320 @@
+use super::*;
+use serde_json::json;
+
+fn key(code: KeyCode) -> Event {
+    Event::Key(event::KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+fn tag(name: &str, sha: &str, date: &str) -> Value {
+    json!({"name":format!("refs/tags/{name}"),"objectId":sha,
+        "targetCommit":{"commitId":sha,"comment":format!("Release {name}"),"committer":{"date":date}}})
+}
+
+fn setup(app: &mut App) -> Result<String> {
+    app.screen = Screen::Repos(vec![
+        json!({"id":"repo","name":"demo","defaultBranch":"refs/heads/main"}),
+    ]);
+    app.repository_view_mut()?;
+    let (key, _) = app.repository()?;
+    app.receive_repository(key.clone(), Reply::Commits { branch:"main".into(), skip:0, values:vec![
+        json!({"commitId":"new","comment":"Newest change","author":{"name":"Dominic"},"committer":{"date":"2026-11-02T09:00:00Z"}}),
+        json!({"commitId":"old","comment":"Older change","author":{"name":"Dominic"},"committer":{"date":"2026-11-01T09:00:00Z"}}),
+    ]});
+    app.receive_repository(
+        key.clone(),
+        Reply::Refs {
+            branches: false,
+            values: vec![
+                tag("fix/2.6.0", "old", "2026-11-01T09:00:00Z"),
+                tag("fix/2.6.1", "new", "2026-11-02T09:00:00Z"),
+                tag("release/2.6.0", "old", "2026-11-01T09:00:00Z"),
+            ],
+        },
+    );
+    Ok(key)
+}
+
+#[test]
+fn nested_paths_group_tags_by_commit_time_with_root_and_unknown_dates() {
+    let values = vec![
+        tag("fix/2.6.1", "a", "2026-11-02T09:00:00+02:00"),
+        tag("fix/2.6.10", "b", "2026-11-02T08:00:00Z"),
+        tag("fix/unknown", "c", ""),
+        tag("fix/security/1.0", "d", "2026-11-01T08:00:00Z"),
+        tag("v2.4.0", "e", "2026-10-01T08:00:00Z"),
+        tag("release/2.6.0", "f", "2026-11-01T08:00:00Z"),
+    ];
+    let rows = ref_rows(&values, false, &BTreeSet::new());
+    let leaves: Vec<_> = rows.iter().filter_map(|r| r.index).collect();
+    assert_eq!(leaves, [3, 1, 0, 2, 5, 4]);
+    assert_eq!(rows[0].name, "fix/");
+    assert_eq!(rows[0].count, 4);
+    assert_eq!(rows[1].name, "security/");
+    assert_eq!(rows[2].depth, 2);
+    assert!(rows.iter().any(|r| r.name == "(root)"));
+    let collapsed = BTreeSet::from(["fix/".into(), "".into()]);
+    let rows = ref_rows(&values, false, &collapsed);
+    assert_eq!(rows.iter().filter_map(|r| r.index).collect::<Vec<_>>(), [5]);
+    assert_eq!(rows[0].count, 4);
+}
+
+#[test]
+fn tabs_folder_keys_and_branch_selection_preserve_each_history() -> Result<()> {
+    let (_root, mut app) = super::super::tests::fixture()?;
+    let id = setup(&mut app)?;
+    app.handle(key(KeyCode::Char('c')))?;
+    assert_eq!(app.pane_focus, 1);
+    app.handle(key(KeyCode::Down))?;
+    assert_eq!(
+        app.repository_view().context("View")?.selected_commit(),
+        Some("old")
+    );
+    app.handle(key(KeyCode::Char('t')))?;
+    assert_eq!(
+        app.repository_view().context("View")?.selected_commit(),
+        Some("new")
+    );
+    app.handle(key(KeyCode::Left))?;
+    app.handle(key(KeyCode::Enter))?;
+    assert!(
+        app.repository_view()
+            .context("View")?
+            .collapsed_tags
+            .contains("fix/")
+    );
+    app.handle(key(KeyCode::Right))?;
+    app.handle(key(KeyCode::Down))?;
+    assert_eq!(
+        app.repository_view().context("View")?.selected_commit(),
+        Some("new")
+    );
+    app.handle(key(KeyCode::F(7)))?;
+    assert_eq!(
+        app.repository_view().context("View")?.selected_commit(),
+        Some("old")
+    );
+
+    app.receive_repository(
+        id.clone(),
+        Reply::Refs {
+            branches: true,
+            values: vec![
+                json!({"name":"refs/heads/main","objectId":"new"}),
+                json!({"name":"refs/heads/fix/2.6.1","objectId":"old"}),
+            ],
+        },
+    );
+    app.receive_repository(
+        id,
+        Reply::Commits {
+            branch: "fix/2.6.1".into(),
+            skip: 0,
+            values: vec![json!({"commitId":"fix"})],
+        },
+    );
+    app.handle(key(KeyCode::Char('r')))?;
+    app.handle(key(KeyCode::Home))?;
+    app.handle(key(KeyCode::Down))?;
+    app.handle(key(KeyCode::Enter))?;
+    let view = app.repository_view().context("View")?;
+    assert_eq!(view.branch, "fix/2.6.1");
+    assert!(!view.picking_branch);
+    assert_eq!(view.selected_commit(), Some("fix"));
+    assert_eq!(view.histories["main"].selection.selected(), Some(1));
+    assert!(app.task.is_none());
+    for (code, tab) in [
+        (KeyCode::Char('i'), 0),
+        (KeyCode::Char('t'), 2),
+        (KeyCode::Char('['), 1),
+        (KeyCode::Char(']'), 2),
+        (KeyCode::F(8), 0),
+        (KeyCode::F(7), 2),
+    ] {
+        app.handle(key(code))?;
+        assert_eq!(app.repository_view().context("View")?.tab, tab);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn refresh_keeps_rows_and_identity_and_ignores_canceled_replies() -> Result<()> {
+    let (_root, mut app) = super::super::tests::fixture()?;
+    auth::pat::save(&app.store, "saved", "fixture-pat")?;
+    let id = setup(&mut app)?;
+    app.handle(key(KeyCode::F(8)))?;
+    app.handle(key(KeyCode::Down))?;
+    app.handle(key(KeyCode::F(5)))?;
+    let generation = app.generation;
+    assert!(app.task.is_some());
+    assert_eq!(
+        app.repository_view().context("View")?.selected_commit(),
+        Some("old")
+    );
+    app.cancel_task();
+    app.receive((
+        generation,
+        Message::Repository {
+            key: id.clone(),
+            reply: Reply::Commits {
+                branch: "main".into(),
+                skip: 0,
+                values: vec![],
+            },
+        },
+    ));
+    assert_eq!(
+        app.repository_view().context("View")?.histories["main"]
+            .commits
+            .len(),
+        2
+    );
+    app.receive((
+        app.generation,
+        Message::Repository {
+            key: id.clone(),
+            reply: Reply::Commits {
+                branch: "main".into(),
+                skip: 0,
+                values: vec![
+                    json!({"commitId":"newer"}),
+                    json!({"commitId":"new"}),
+                    json!({"commitId":"old"}),
+                ],
+            },
+        },
+    ));
+    assert_eq!(
+        app.repository_view().context("View")?.histories["main"]
+            .selection
+            .selected(),
+        Some(2)
+    );
+    app.receive_repository(
+        id.clone(),
+        Reply::Commits {
+            branch: "main".into(),
+            skip: 3,
+            values: vec![json!({"commitId":"older"})],
+        },
+    );
+    assert_eq!(
+        app.repository_view().context("View")?.selected_commit(),
+        Some("old")
+    );
+    assert_eq!(
+        app.repository_view().context("View")?.histories["main"]
+            .commits
+            .len(),
+        4
+    );
+    app.receive_repository(
+        id,
+        Reply::Commits {
+            branch: "main".into(),
+            skip: 1,
+            values: vec![json!({"commitId":"wrong-page"})],
+        },
+    );
+    assert_eq!(
+        app.repository_view().context("View")?.histories["main"]
+            .commits
+            .len(),
+        4
+    );
+    app.settings.project = Some("another".into());
+    assert!(app.repository_view().is_none());
+    assert_eq!(app.repository_view_mut()?.tab, 0);
+    app.settings.project = Some("project".into());
+    assert_eq!(
+        app.repository_view().context("View")?.selected_commit(),
+        Some("old")
+    );
+    Ok(())
+}
+
+#[test]
+fn commit_files_diffs_and_escape_stay_with_the_selected_commit() -> Result<()> {
+    let (_root, mut app) = super::super::tests::fixture()?;
+    let id = setup(&mut app)?;
+    app.handle(key(KeyCode::F(8)))?;
+    app.receive_repository(
+        id.clone(),
+        Reply::Changes(
+            json!({"detailLabel":"Commit new", "detailChanges":{"head":"new","files":[
+                {"item":{"path":"/first"},"diff":"-old\n+new"},
+                {"item":{"path":"/second"},"diff":"+second"}
+            ]}}),
+        ),
+    );
+    app.handle(key(KeyCode::Down))?;
+    app.receive_repository(
+        id,
+        Reply::Diff {
+            commit: "another".into(),
+            index: 1,
+            diff: "wrong".into(),
+        },
+    );
+    app.handle(key(KeyCode::Enter))?;
+    assert_eq!(app.pane_focus, 1);
+    let detail = app
+        .repository_view()
+        .context("View")?
+        .detail
+        .as_ref()
+        .context("Detail")?;
+    assert_eq!(detail["detailChanges"]["files"][1]["diff"], "+second");
+    app.handle(key(KeyCode::Down))?;
+    assert_eq!(app.pane_y[1], 1);
+    app.handle(key(KeyCode::Home))?;
+    assert_eq!(app.pane_y[1], 0);
+    app.handle(key(KeyCode::Esc))?;
+    assert!(app.repository_view().context("View")?.detail.is_none());
+    assert_eq!(app.repository_view().context("View")?.tab, 1);
+    assert_eq!(app.pane_focus, 1);
+    app.handle(key(KeyCode::Esc))?;
+    assert_eq!(app.pane_focus, 0);
+    Ok(())
+}
+
+#[test]
+fn history_tags_and_commit_diffs_render_at_narrow_and_wide_sizes() -> Result<()> {
+    let (_root, mut app) = super::super::tests::fixture()?;
+    let id = setup(&mut app)?;
+    for tab in [1, 2] {
+        app.repository_view_mut()?.tab = tab;
+        for width in [40, 80, 120] {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 32))?;
+            terminal.draw(|frame| draw(frame, &mut app))?;
+            let buffer = terminal.backend().buffer();
+            let text: String = buffer.content.iter().map(|c| c.symbol()).collect();
+            assert!(text.contains("Commits") && text.contains("Tags"));
+            assert!(
+                text.contains("Info [i]")
+                    && text.contains("Commits [c]")
+                    && text.contains("Tags [t]")
+            );
+            assert!(text.contains(if tab == 1 { "Newest change" } else { "2.6.1" }));
+            assert!(!text.contains("not loaded"));
+        }
+    }
+    app.receive_repository(id, Reply::Changes(json!({"detailLabel":"Commit new", "detailChanges":{"head":"new","files":[{"item":{"path":"/first"},"diff":"-old\n+new"}]}})));
+    for (width, height) in [(40, 24), (120, 32), (15, 6)] {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))?;
+        terminal.draw(|frame| draw(frame, &mut app))?;
+        if width > 15 {
+            let buffer = terminal.backend().buffer();
+            let text: String = buffer.content.iter().map(|c| c.symbol()).collect();
+            assert!(text.contains("Commit new") && text.contains("+new"));
+            assert!(
+                buffer
+                    .content
+                    .iter()
+                    .any(|c| c.symbol() == "+" && c.fg == Color::Green)
+            );
+        }
+    }
+    Ok(())
+}

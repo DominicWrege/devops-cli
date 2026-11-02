@@ -109,17 +109,17 @@ jobs:
           \`mise use -g github:$GH_REPO@$VERSION\`
 
           Start setup with \`devops login\`. Enter your organization and a personal access token at the masked prompt; no Entra app registration is required. Entra sign-in remains available with \`--entra\`.
-          Version 0.4.1 adds PR file review and browser/editor shortcuts, and fixes the identity lookup used by PAT approval.
+          Version 0.4.2 adds repository commit history, grouped tags, and direct shortcuts for repository and PR review tabs.
 
-          - Approval and assigned reviews use the selected organization's authenticated-user identity instead of the global Profiles API, which can reject PATs.
-          - Press d in PR details for changed files, then Enter to load a unified diff. Diffs compare fixed commits from the latest PR iteration against its merge base.
-          - F7/F8 switches Description, Comments, Status, and Files. The existing [ and ] shortcuts still work, with clearer tab hints.
-          - Press b on a repository or PR to open it in the default browser.
-          - Press o to open an existing checkout in a GUI editor. The directory and executable are remembered; the current branch is preserved.
-          - Up/Down and PageUp/PageDown navigation hints are hidden for a simpler command bar. The keys still work.
+          - In Repositories, press i for Info, c for Commits, or t for Tags. Commits are newest first and grouped by day; m loads older commits from the same snapshot.
+          - Tags and the branch picker group slash-separated names into collapsible folders, including nested paths such as fix/2.6.1. Tags sort newest first within each folder by target commit date.
+          - Press r to select a branch. Each repository and branch keeps its loaded history and selection for the session.
+          - Select a commit or tag and press Enter for changed files, then Enter on a file for its diff. Root commits are supported; merge diffs compare against the first parent.
+          - PR review tabs now use d for Description, c for Comments, t for Status, and f for Files. To add a comment, press ? then c.
+          - The existing [ and ] and F7/F8 cycling shortcuts still work. Press b to open the selected commit in the browser.
 
           Text diffs are limited to 1 MiB per side. Binary files and submodules direct you to the browser.
-          Live tenant approval, live diff responses, and desktop browser/editor handoff remain unverified; mock API and TUI tests cover these changes.
+          Live tenant history, tag and merge-diff responses, and desktop browser/editor handoff remain unverified; mock API and TUI tests cover these changes.
 
           Linux uses a static musl binary, with no glibc requirement. ARM64 and macOS builds are not provided.
           Live tenant authentication acceptance is still required. See the README and docs/acceptance.md.
