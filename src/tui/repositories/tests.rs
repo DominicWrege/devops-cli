@@ -46,6 +46,284 @@ fn setup_filter(app: &mut App) {
     ));
 }
 
+fn setup_tag_actions(app: &mut App) -> Result<String> {
+    let id = setup(app)?;
+    let view = app.repo_views.get_mut(&id).context("View")?;
+    for commit in &mut view.histories.get_mut("main").context("History")?.commits {
+        commit["commitId"] = json!(if commit["commitId"] == "new" {
+            "1".repeat(40)
+        } else {
+            "2".repeat(40)
+        });
+    }
+    for tag in view.tags.as_mut().context("Tags")? {
+        let sha = if tag["objectId"] == "new" {
+            "1".repeat(40)
+        } else {
+            "2".repeat(40)
+        };
+        tag["objectId"] = json!(sha);
+        tag["targetCommit"]["commitId"] = json!(sha);
+        if sha == "1".repeat(40) {
+            tag["objectId"] = json!("3".repeat(40));
+            tag["peeledObjectId"] = json!(sha);
+        }
+    }
+    app.handle(key(KeyCode::Char('t')))?;
+    Ok(id)
+}
+
+#[test]
+fn tag_forms_use_selected_commits_and_validate_names_targets_and_duplicates() -> Result<()> {
+    let (_root, mut app) = super::super::tests::fixture()?;
+    setup_tag_actions(&mut app)?;
+    for tab in ['c', 't'] {
+        app.handle(key(KeyCode::Char(tab)))?;
+        app.handle(key(KeyCode::Char('n')))?;
+        let form = app.form.as_ref().context("Create form")?;
+        assert!(matches!(&form.kind, FormKind::Tag(edit) if edit.original.is_none()));
+        assert_eq!(form.value(1)?, "1".repeat(40));
+        assert!(form.value(0)?.is_empty());
+        app.handle(Event::Paste("bad..name".into()))?;
+        assert!(app.submit().is_err());
+        app.form.as_mut().context("Form")?.fields[0].value = "new-tag".into();
+        app.form.as_mut().context("Form")?.fields[1].value = "short".into();
+        assert!(app.submit().is_err());
+        assert!(app.task.is_none());
+        app.handle(key(KeyCode::Esc))?;
+    }
+    app.handle(key(KeyCode::Char('e')))?;
+    let form = app.form.as_ref().context("Rename form")?;
+    assert_eq!(form.value(0)?, "fix/2.6.1");
+    assert!(
+        matches!(&form.kind, FormKind::Tag(edit) if edit.original.as_ref().is_some_and(|tag| tag["objectId"] == "3".repeat(40)))
+    );
+    assert!(
+        app.submit()
+            .err()
+            .context("no-op rename")?
+            .to_string()
+            .contains("different")
+    );
+    app.form.as_mut().context("Form")?.fields[0].value = "fix/2.6.0".into();
+    assert!(
+        app.submit()
+            .err()
+            .context("duplicate")?
+            .to_string()
+            .contains("already exists")
+    );
+    assert!(app.form.is_some());
+    assert!(app.task.is_none());
+    app.handle(key(KeyCode::Esc))?;
+    app.handle(key(KeyCode::Left))?; // folder, not a tag
+    assert!(
+        command_hints(&app)
+            .iter()
+            .filter(|(hint, _)| matches!(hint.as_str(), "Rename [e]" | "Delete [d/Del]"))
+            .all(|(_, enabled)| !enabled)
+    );
+    for code in [KeyCode::Char('e'), KeyCode::Char('d'), KeyCode::Delete] {
+        assert!(app.handle(key(code)).is_err());
+        assert!(app.form.is_none() && app.tag_confirm.is_none() && app.task.is_none());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn tag_deletion_requires_confirmation_and_submitted_writes_block_navigation() -> Result<()> {
+    let (_root, mut app) = super::super::tests::fixture()?;
+    auth::pat::save(&app.store, "saved", "fixture-pat")?;
+    setup_tag_actions(&mut app)?;
+    app.handle(key(KeyCode::Char('d')))?;
+    assert!(
+        matches!(&app.tag_confirm.as_ref().context("Confirmation")?.change,
+        TagChange::Delete { name, object } if name == "refs/tags/fix/2.6.1" && object == &"3".repeat(40))
+    );
+    assert!(app.task.is_none());
+    app.handle(key(KeyCode::Char('3')))?;
+    assert!(app.tag_confirm.is_some());
+    for (width, height) in [(15, 6), (40, 24), (120, 32)] {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))?;
+        terminal.draw(|frame| draw(frame, &mut app))?;
+        if width >= 40 {
+            let rendered: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(rendered.contains("Delete tag fix/2.6.1?"));
+            assert!(rendered.contains("y: confirm"));
+        }
+    }
+    app.handle(key(KeyCode::Char('n')))?;
+    assert!(app.tag_confirm.is_none() && app.task.is_none());
+    app.pane_focus = 1;
+    app.handle(key(KeyCode::Delete))?;
+    app.handle(key(KeyCode::Esc))?;
+    assert!(app.tag_confirm.is_none() && app.task.is_none());
+    app.handle(key(KeyCode::Delete))?;
+    app.handle(key(KeyCode::Char('y')))?;
+    let generation = app.generation;
+    assert!(app.writing && app.task.is_some());
+    for code in [
+        KeyCode::Char('c'),
+        KeyCode::F(5),
+        KeyCode::Esc,
+        KeyCode::Char('3'),
+        KeyCode::Char('r'),
+        KeyCode::Char('n'),
+        KeyCode::Char('q'),
+    ] {
+        assert!(!app.handle(key(code))?);
+        assert_eq!(app.generation, generation);
+        assert!(app.writing && app.task.is_some());
+    }
+    app.cancel_task();
+    app.receive((app.generation, Message::Error("staleOldObjectId".into())));
+    assert!(!app.writing);
+    assert!(app.tag_confirm.is_none());
+    assert_eq!(
+        app.repository_view()
+            .context("View")?
+            .tags
+            .as_ref()
+            .context("Tags")?
+            .len(),
+        3
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_tag_saves_keep_form_values_and_allow_correction() -> Result<()> {
+    let (_root, mut app) = super::super::tests::fixture()?;
+    auth::pat::save(&app.store, "saved", "fixture-pat")?;
+    setup_tag_actions(&mut app)?;
+    app.handle(key(KeyCode::Char('e')))?;
+    app.form.as_mut().context("Form")?.fields[0].value = "release/new".into();
+    app.handle(key(KeyCode::Enter))?;
+    assert!(app.writing && app.task.is_some());
+    app.handle(Event::Paste("cannot edit while saving".into()))?;
+    app.handle(key(KeyCode::Esc))?;
+    assert_eq!(app.form.as_ref().context("Form")?.value(0)?, "release/new");
+    app.cancel_task();
+    app.receive((app.generation, Message::Error("Permission denied".into())));
+    assert!(!app.writing);
+    assert_eq!(app.form.as_ref().context("Form")?.value(0)?, "release/new");
+    assert!(app.status.contains("Permission denied"));
+    for (width, height) in [(15, 6), (40, 24), (120, 32)] {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))?;
+        terminal.draw(|frame| draw(frame, &mut app))?;
+        if width >= 40 {
+            let rendered: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(rendered.contains("Rename tag"));
+            assert!(rendered.contains("release/new"));
+        }
+    }
+    app.handle(key(KeyCode::Esc))?;
+    assert!(app.form.is_none());
+    Ok(())
+}
+
+#[test]
+fn saved_tags_select_and_reveal_the_destination_even_when_refresh_fails() -> Result<()> {
+    let (_root, mut app) = super::super::tests::fixture()?;
+    let id = setup_tag_actions(&mut app)?;
+    app.handle(key(KeyCode::Char('e')))?;
+    app.repo_views
+        .get_mut(&id)
+        .context("View")?
+        .collapsed_tags
+        .insert("release/".into());
+    app.receive((
+        app.generation,
+        Message::Repository {
+            key: id.clone(),
+            reply: Reply::TagWritten {
+                change: TagChange::Rename {
+                    old: "refs/tags/fix/2.6.1".into(),
+                    name: "refs/tags/release/new".into(),
+                    object: "3".repeat(40),
+                },
+                refreshed: Err("offline".into()),
+            },
+        },
+    ));
+    let view = app.repository_view().context("View")?;
+    let selected =
+        &view.tags.as_ref().context("Tags")?[view.selected_ref().context("Selected tag")?];
+    assert_eq!(selected["name"], "refs/tags/release/new");
+    assert_eq!(selected["objectId"], "3".repeat(40));
+    assert_eq!(ref_commit(selected), "1".repeat(40));
+    assert!(!view.collapsed_tags.contains("release/"));
+    assert!(app.form.is_none());
+    assert!(app.status.contains("Renamed tag fix/2.6.1 to release/new"));
+    assert!(app.status.contains("refresh failed: offline"));
+    app.repo_views
+        .get_mut(&id)
+        .context("View")?
+        .collapsed_tags
+        .insert("release/security/".into());
+    let created = tag(
+        "release/security/v3",
+        &"1".repeat(40),
+        "2026-11-02T08:00:00Z",
+    );
+    app.receive((
+        app.generation,
+        Message::Repository {
+            key: id.clone(),
+            reply: Reply::TagWritten {
+                change: TagChange::Create {
+                    name: "refs/tags/release/security/v3".into(),
+                    target: "1".repeat(40),
+                },
+                refreshed: Ok(vec![created]),
+            },
+        },
+    ));
+    let view = app.repository_view().context("View")?;
+    assert!(view.collapsed_tags.is_empty());
+    assert_eq!(view.selected_ref(), Some(0));
+    assert_eq!(view.selected_commit(), Some("1".repeat(40).as_str()));
+    app.receive((
+        app.generation,
+        Message::Repository {
+            key: id,
+            reply: Reply::TagWritten {
+                change: TagChange::Delete {
+                    name: "refs/tags/release/security/v3".into(),
+                    object: "1".repeat(40),
+                },
+                refreshed: Err("offline".into()),
+            },
+        },
+    ));
+    let view = app.repository_view().context("View")?;
+    assert!(view.tags.as_ref().context("Tags")?.is_empty());
+    assert!(view.tags_selection.selected().is_none());
+    assert!(app.status.contains("Deleted tag release/security/v3"));
+    assert!(
+        command_hints(&app)
+            .iter()
+            .any(|(hint, enabled)| hint == "New tag [n]" && *enabled)
+    );
+    app.handle(key(KeyCode::Char('n')))?;
+    assert!(app.form.is_some()); // First tag can also be created in an empty list.
+    Ok(())
+}
+
 #[test]
 fn repository_filter_preserves_selection_and_details_use_the_matching_repository() -> Result<()> {
     let (_root, mut app) = super::super::tests::fixture()?;

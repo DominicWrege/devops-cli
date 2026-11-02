@@ -19,6 +19,8 @@ pub struct Settings {
     pub project_id: Option<String>,
     pub tenant_id: Option<String>,
     pub client_id: Option<String>,
+    #[serde(default)]
+    pub code_base_paths: std::collections::BTreeMap<String, PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -162,6 +164,14 @@ fn reject_symlink(path: &Path) -> Result<()> {
 }
 
 impl Settings {
+    pub fn project_key(target: &Target) -> String {
+        format!("{}/{}", target.organization, target.project)
+    }
+    pub fn code_base_path(&self, target: &Target) -> Option<&Path> {
+        self.code_base_paths
+            .get(&Self::project_key(target))
+            .map(PathBuf::as_path)
+    }
     pub fn target(&self, org: Option<&str>, project: Option<&str>) -> Result<Target> {
         let organization = organization(
             org.or(self.organization.as_deref())

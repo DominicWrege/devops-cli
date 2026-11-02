@@ -9,7 +9,7 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.4.3
+mise use -g github:DominicWrege/devops-cli@0.4.4
 devops login
 ```
 
@@ -76,6 +76,11 @@ The TUI remembers your selected organization and project and opens directly to
 pull requests on subsequent launches. If you are signed in but have no selected
 project, it opens the project picker without asking for your token again.
 Press `s` in the workspace for Settings, then choose Current project or Account.
+Settings also has a Code base path for the current organization and project.
+Set it to the folder containing your local repositories; `F2` opens a directory
+browser. New editor forms start at the matching repository folder when it exists,
+or at the code base folder. Saved checkout choices take precedence. Leave the
+setting blank to clear it. Code base paths are saved in `settings.json`.
 The project picker opens over your current view; `Esc` restores its selection and
 scroll position. Project selection is remembered for CLI commands too.
 
@@ -150,6 +155,10 @@ From the PR list or details, `b` opens the PR in your default browser, where you
 can review changes and comments in Azure DevOps. `o` opens a form for an existing
 local checkout directory and a GUI editor executable. It opens that checkout's
 current branch; it does not clone, fetch, or switch to the PR branch.
+Press `F2` on either path field to browse. Use Up/Down to select an entry,
+`Enter` to open a folder or choose an editor file, Backspace to go to the parent,
+and `Ctrl+S` to choose the current folder. `Esc` returns to the form without
+changing its path.
 
 ### Repositories
 
@@ -179,6 +188,15 @@ last. This works for annotated and lightweight tags. The preview shows the full
 tag name and target commit. On a folder, Enter toggles it and Left/Right collapses
 or expands it; Left on a tag selects its folder. Use `w` or `F6` to return to the
 repository list.
+
+In Commits or Tags, press `n` to create a lightweight tag. Enter its name and a
+full commit SHA; the SHA defaults to the selected commit when available.
+In Tags, select an individual tag and press `e` to rename it, or `d` / Delete to
+delete it after confirmation. Renaming preserves the tag object and annotations:
+it creates the new name before deleting the old one. If deletion fails, both
+names may remain; refresh with `F5` to inspect them. Tag changes require the
+corresponding repository permissions, including permission to delete tags, and
+a PAT with **Code: Read & write** when using PAT authentication.
 
 On a commit or tag, Enter opens the commit's changed files. Select a file and press
 Enter for its diff; `w` / `F6` switches between files and diff, and Esc returns to

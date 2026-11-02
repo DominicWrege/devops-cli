@@ -46,7 +46,7 @@ pub fn segment(value: &str) -> String {
 
 mod repository;
 mod review;
-pub(crate) use repository::{commit_date, ref_commit};
+pub(crate) use repository::{TagChange, commit_date, ref_commit, tag_name};
 pub fn branch(value: &str) -> String {
     if value.starts_with("refs/") {
         value.into()
