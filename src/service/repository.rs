@@ -45,7 +45,12 @@ impl Service {
         )?))
     }
 
-    pub async fn repo_refs(&self, repo: &str, tags: bool) -> Result<Vec<Value>> {
+    async fn repo_refs_filtered(
+        &self,
+        repo: &str,
+        filter: &str,
+        peel_tags: bool,
+    ) -> Result<Vec<Value>> {
         let mut values = Vec::new();
         let mut token = String::new();
         let mut seen = BTreeSet::new();
@@ -54,8 +59,8 @@ impl Service {
                 .git()
                 .refs_client()
                 .list(self.org(), segment(repo), self.project())
-                .filter(if tags { "tags/" } else { "heads/" })
-                .peel_tags(tags)
+                .filter(filter)
+                .peel_tags(peel_tags)
                 .top(1000);
             if !token.is_empty() {
                 request = request.continuation_token(&token);
@@ -76,6 +81,13 @@ impl Service {
             );
             token = next;
         }
+        Ok(values)
+    }
+
+    pub async fn repo_refs(&self, repo: &str, tags: bool) -> Result<Vec<Value>> {
+        let mut values = self
+            .repo_refs_filtered(repo, if tags { "tags/" } else { "heads/" }, tags)
+            .await?;
         if tags {
             // Ref listings contain no dates. Resolve unique, peeled targets in batches
             // so chronological ordering also works for lightweight and shared tags.

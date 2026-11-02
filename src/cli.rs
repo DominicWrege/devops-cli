@@ -88,6 +88,54 @@ pub enum Command {
         #[command(subcommand)]
         command: RepoCommand,
     },
+    /// Remote Git tags
+    Tag {
+        #[command(subcommand)]
+        command: TagCommand,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum TagCommand {
+    /// Create a lightweight tag at a full commit/object SHA
+    Create {
+        name: String,
+        #[arg(short = 'R', long, help = "Repository name or UUID")]
+        repo: String,
+        #[arg(long, help = "Full, nonzero 40-character commit/object SHA")]
+        target: String,
+    },
+    /// Delete a remote tag
+    Delete {
+        name: String,
+        #[arg(short = 'R', long, help = "Repository name or UUID")]
+        repo: String,
+        #[arg(long, help = "Acknowledge deletion of this tag; the CLI never prompts")]
+        yes: bool,
+    },
+}
+
+impl TagCommand {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        match self {
+            Self::Create { name, repo, target } => {
+                repository(repo)?;
+                crate::service::TagChange::Create {
+                    name: name.clone(),
+                    target: target.clone(),
+                }
+                .validate()
+                .map_err(|error| crate::error::invalid(error.to_string()))?;
+            }
+            Self::Delete { name, repo, yes } => {
+                acknowledge(*yes)?;
+                repository(repo)?;
+                crate::service::tag_name(name)
+                    .map_err(|error| crate::error::invalid(error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Subcommand, Clone)]

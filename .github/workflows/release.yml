@@ -109,16 +109,15 @@ jobs:
           \`mise use -g github:$GH_REPO@$VERSION\`
 
           Start setup with \`devops login\`. Enter your organization and a personal access token at the masked prompt; no Entra app registration is required. Entra sign-in remains available with \`--entra\`.
-          Version 0.4.4 adds tag management and local path browsing.
+          Version 0.4.5 adds CLI tag creation and deletion and widens the repository list in the TUI.
 
-          - Press n in Commits or Tags to create a lightweight tag, with an editable commit SHA prefilled from the selected commit when available.
-          - In Tags, press e to rename an individual tag, or d / Delete to delete it after confirmation. Renaming preserves its object and annotations, creates the new name first, and reports any failure to remove the old name.
-          - Tag updates reject invalid names and duplicate destinations, protect against concurrent ref changes, and refresh the list after a successful save.
-          - Press F2 in editor path fields to browse local directories and executable files. Ctrl+S chooses the current directory; Esc returns without changing the form.
-          - Settings now includes a Code base path for each organization and project. Editor forms start in a matching repository folder when available, while saved checkout choices take precedence.
+          - Use devops tag create NAME --repo REPO --target SHA to create a lightweight remote tag at a full 40-character commit/object SHA.
+          - Use devops tag delete NAME --repo REPO --yes to delete a remote tag. Deletion finds the exact tag across paginated results and uses its unpeeled object ID to reject concurrent changes, including for annotated tags.
+          - Both tag commands accept -R as shorthand for --repo and support --json. Invalid names, targets, and missing deletion acknowledgement fail before authentication.
+          - The repository TUI list now uses 40% of wide terminals, up from 25%, giving repository names more room.
 
           Text diffs are limited to 1 MiB per side. Binary files and submodules direct you to the browser.
-          Live tenant tag writes and local Linux/WSL integration were not retested for this patch; mock API and TUI tests cover these changes.
+          Live tenant tag writes and local Linux/WSL integration were not retested for this patch; mock API, CLI, and TUI tests cover these changes.
 
           Linux uses a static musl binary, with no glibc requirement. ARM64 and macOS builds are not provided.
           Live tenant authentication acceptance is still required. See the README and docs/acceptance.md.

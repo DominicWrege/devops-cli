@@ -164,6 +164,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Pr { command } => command.validate()?,
         Command::Pipeline { command } => command.validate()?,
         Command::Repo { command } => command.validate()?,
+        Command::Tag { command } => command.validate()?,
     }
     let target = settings.target(cli.org.as_deref(), cli.project.as_deref())?;
     // Saved PATs belong to organizations, including when --org overrides the default.
@@ -175,6 +176,9 @@ async fn run(cli: Cli) -> Result<()> {
     if cli.json {
         let value = match &cli.command {
             Command::Pr { command } => api.pr_json(command).await?,
+            Command::Tag { command } => {
+                serde_json::json!({"message": api.tag_action(command).await?})
+            }
             Command::Repo {
                 command: cli::RepoCommand::List,
             } => serde_json::json!(api.repo_list().await?),
@@ -191,6 +195,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
     let result = match cli.command {
         Command::Pr { command } => api.pr_action(&command).await?,
+        Command::Tag { command } => api.tag_action(&command).await?,
         Command::Repo {
             command: cli::RepoCommand::List,
         } => output::table(
