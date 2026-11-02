@@ -2,6 +2,25 @@
 
 No live Azure DevOps writes have been run by the implementation session. Use an explicitly approved disposable repository, PR, and pipeline for these checks.
 
+## 0.4.2 verification
+
+Automated checks cover branch-history pagination, peeled annotated tags,
+lightweight tags, paginated refs, nested path groups, date ordering across time
+zones, preserved selections, canceled replies, and root-commit diffs. TUI checks
+exercise commit/tag tabs, folder keys, grouped branch selection, and file/diff
+navigation at narrow and wide sizes.
+
+Repository tabs use i/c/t for Info/Commits/Tags. PR review tabs use d/c/t/f for
+Description/Comments/Status/Files, with comment creation under ? then c. Existing
+bracket and function-key cycling remains covered. Local Windows checks cover
+124 passing Rust tests (one credential-dependent test ignored), formatting,
+Clippy, and five release-packaging tests.
+
+Live tenant verification remains outstanding: browse more than 100 commits,
+switch between `main` and a slash-named branch, expand nested tag paths, inspect
+an annotated and a lightweight tag, and compare a merge commit's diff with the
+Azure DevOps browser. Confirm browser/editor handoff on Windows and Linux/WSL.
+
 ## 0.4.1 verification
 
 Local Windows verification covers 115 passing Rust tests, formatting, Clippy,

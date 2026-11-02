@@ -84,14 +84,14 @@ impl Service {
             .filter(|p| !p.is_empty())
             .unwrap_or(path);
         if file["item"]["gitObjectType"] == "commit" {
-            return Ok("Submodule change. Open the PR in the browser with b to inspect it.".into());
+            return Ok("Submodule change. Open in the browser with b to inspect it.".into());
         }
         let repo = text(changes, "repository");
         let base = text(changes, "base");
         let head = text(changes, "head");
         ensure!(
-            !repo.is_empty() && !base.is_empty() && !head.is_empty(),
-            "Incomplete review snapshot"
+            !repo.is_empty() && (!base.is_empty() || added) && !head.is_empty(),
+            "Incomplete diff snapshot"
         );
         let (old, new) = tokio::try_join!(
             async {
@@ -111,20 +111,20 @@ impl Service {
         )?;
         if old["contentMetadata"]["isBinary"] == true || new["contentMetadata"]["isBinary"] == true
         {
-            return Ok("Binary file. Open the PR in the browser with b to inspect it.".into());
+            return Ok("Binary file. Open in the browser with b to inspect it.".into());
         }
         let old_text = old["content"]
             .as_str()
-            .context("Base file content unavailable; open the PR in the browser with b")?;
+            .context("Base file content unavailable; open in the browser with b")?;
         let new_text = new["content"]
             .as_str()
-            .context("Source file content unavailable; open the PR in the browser with b")?;
+            .context("Source file content unavailable; open in the browser with b")?;
         if old_text.contains('\0') || new_text.contains('\0') {
-            return Ok("Binary file. Open the PR in the browser with b to inspect it.".into());
+            return Ok("Binary file. Open in the browser with b to inspect it.".into());
         }
         if old_text.len() > MAX_DIFF_BYTES || new_text.len() > MAX_DIFF_BYTES {
             return Ok(
-                "File exceeds the 1 MiB text diff limit. Open the PR in the browser with b.".into(),
+                "File exceeds the 1 MiB text diff limit. Open in the browser with b.".into(),
             );
         }
         let before = if added {

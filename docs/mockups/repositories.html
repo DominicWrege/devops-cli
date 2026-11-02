@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Repository commits and grouped tags — TUI mockups</title>
+<style>
+:root{color-scheme:dark;--background:#101216;--foreground:#e1e6ed;--muted:#9099a5;--card:#161b22;--popover:#1b222c;--secondary:#242c36;--border:#39434f;--ring:#80baff;--primary:#205cb3;--primary-foreground:#fff;--accent:#8bbaff;--success:#86d7a0;--code-background:#0d1117;--radius:6px;--font-sans:system-ui,sans-serif;--font-mono:Consolas,'Courier New',monospace}
+*{box-sizing:border-box}html,body{margin:0}body{font:13px var(--font-sans);color:var(--foreground)}button,select{font:inherit;color:inherit;cursor:pointer}button:focus-visible,select:focus-visible{outline:2px solid var(--ring);outline-offset:2px}.caption{display:flex;align-items:center;justify-content:space-between;margin:0 0 10px;gap:12px}.caption strong{font-size:14px;font-weight:600}.caption span{font-size:11px;color:var(--muted)}.mockup{margin-bottom:26px}.terminal{background:var(--code-background);padding:16px;border-radius:var(--radius);font:11px/1.65 var(--font-mono);overflow:hidden}.top{display:flex;gap:12px;border-bottom:1px solid var(--border);padding-bottom:7px;margin-bottom:12px;white-space:nowrap}.muted{color:var(--muted)}.top .active{color:var(--foreground);text-decoration:underline;text-underline-offset:4px}.context{margin-left:auto;color:var(--muted)}.workspace{display:grid;grid-template-columns:137px minmax(0,1fr);gap:10px}.pane{border:1px solid var(--border);position:relative;min-width:0;padding:13px 7px 7px}.pane.focus{border-color:var(--accent)}.pane-label{position:absolute;top:-10px;left:8px;padding:0 5px;background:var(--code-background);color:var(--muted)}.focus>.pane-label{color:var(--accent)}.repos{padding:4px 0 95px}.repo{padding:2px 5px;color:var(--muted)}.repo.current{color:var(--foreground);background:var(--secondary)}.repo.current:before{content:'› '}.repo:not(.current){padding-left:17px}.repo-meta{border-top:1px solid var(--border);padding:10px 5px;color:var(--muted);font-size:10px}.good{color:var(--success)}.tabs{display:flex;gap:14px;border-bottom:1px solid var(--border);padding:0 1px 6px;margin-bottom:8px}.tabs button{padding:0;border:0;background:none;color:var(--muted)}.tabs button.chosen{color:var(--accent);text-decoration:underline;text-underline-offset:6px}.tools{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:0 2px 6px;color:var(--muted);font-size:10px}.branch{background:var(--secondary);border:1px solid var(--border);padding:2px 4px;max-width:155px;color:var(--foreground)}.section-label{color:var(--muted);padding:7px 5px 3px;font-size:10px}.commit,.tag{display:block;width:100%;text-align:left;border:0;background:none;padding:4px 5px;line-height:1.6}.commit.selected,.tag.selected{background:var(--primary);color:var(--primary-foreground)}.title{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta{display:flex;gap:8px;color:var(--muted);font-size:10px;justify-content:space-between}.selected .meta{color:var(--primary-foreground);opacity:.85}.hash{color:var(--accent)}.selected .hash{color:inherit}.badge{border:1px solid var(--border);padding:0 4px;border-radius:3px;font-size:9px;color:var(--success);margin-left:6px}.selected .badge{color:inherit;border-color:currentColor}.preview{border-top:1px solid var(--border);margin-top:9px;padding:8px 5px 2px;min-height:64px;font-size:10px}.preview .heading{color:var(--accent);margin-bottom:2px}.footer{display:flex;flex-wrap:wrap;gap:3px 13px;margin-top:12px;background:var(--primary);color:var(--primary-foreground);padding:3px 7px;font-size:10px}.footnote{margin:8px 0 0;font-size:11px;color:var(--muted);line-height:1.6}.group{width:100%;background:none;color:var(--foreground);border:0;display:flex;justify-content:space-between;text-align:left;padding:6px 5px 2px;font-weight:600}.group small{color:var(--muted);font-weight:normal}.tag{padding-left:20px;display:flex;justify-content:space-between;align-items:center}.tag-name{display:flex;align-items:center;gap:7px}.tag .meta{display:block;text-align:right}.tree{color:var(--muted)}.empty{color:var(--muted);padding:24px 5px}.more{color:var(--muted);text-align:center;font-size:10px;padding-top:6px}.overview{padding:8px 5px;min-height:280px;line-height:2}.source{font-size:11px;color:var(--muted);margin:0 0 12px}.source a{color:var(--accent)}
+@media(max-width:540px){.terminal{padding:12px 8px;font-size:10px}.workspace{grid-template-columns:100px minmax(0,1fr);gap:6px}.context{display:none}.top{gap:8px;font-size:9px}.tabs{gap:9px;font-size:10px}.tools{align-items:flex-start;flex-direction:column}.caption span{max-width:150px;text-align:right}.repo-meta{font-size:9px}.meta{font-size:9px}.tag{padding-left:8px}.tag .meta{font-size:9px}.badge{display:none}.footer{gap:3px 8px}.title{white-space:normal}.preview{min-height:80px}}
+</style>
+</head>
+<body>
+<div class="mockup">
+ <div class="caption"><strong>01 / Commits</strong><span>Branch history · newest first</span></div>
+ <div class="terminal" data-screen="commits"></div>
+ <p class="footnote">Choose a branch or select a commit to update the preview. Branch names are grouped by path in the picker.</p>
+</div>
+<div class="mockup">
+ <div class="caption"><strong>02 / Tags grouped by path</strong><span>Collapsible folders · newest first per folder</span></div>
+ <div class="terminal" data-screen="tags"></div>
+ <p class="footnote">Full names stay intact: <code>fix/2.6.1</code> appears as <code>2.6.1</code> under <code>fix/</code>. Click a folder to collapse it, or a tag to preview its target commit.</p>
+</div>
+<p class="source">Illustrative data. Chronological history follows the <a href="https://docs.github.com/en/repositories/releasing-projects-on-github/viewing-your-repositorys-releases-and-tags">GitHub reference</a>; path grouping is the proposed addition.</p>
+<script>
+const commits=[
+ {day:'Nov 2, 2026',title:'Fix token refresh after session expires',sha:'8f3a92c',author:'Dominic',time:'14:32',files:'3 files changed · +42 −11',ref:'fix/2.6.1'},
+ {day:'Nov 2, 2026',title:'Handle canceled sign-in without losing context',sha:'2bc61de',author:'Dominic',time:'11:08',files:'2 files changed · +18 −6'},
+ {day:'Nov 1, 2026',title:'Release 2.6.0',sha:'c4d981a',author:'Dominic',time:'16:45',files:'4 files changed · +29 −9',ref:'release/2.6.0'},
+ {day:'Nov 1, 2026',title:'Preserve selection when refreshing repositories',sha:'a72f0b3',author:'Dominic',time:'09:12',files:'2 files changed · +54 −15'},
+ {day:'Oct 30, 2026',title:'Add repository history navigation',sha:'e6c4f19',author:'Dominic',time:'15:20',files:'5 files changed · +231 −28'}
+];
+const groups=[
+ {name:'fix/',items:[{name:'2.6.1',date:'Nov 2, 2026',sha:'8f3a92c',title:'Fix token refresh after session expires'},{name:'2.5.3',date:'Oct 24, 2026',sha:'3d9b5e1',title:'Fix pipeline reconnect on timeout'},{name:'2.5.2',date:'Oct 20, 2026',sha:'a52c8d4',title:'Keep current project after sign-in'}]},
+ {name:'release/',items:[{name:'2.6.0',date:'Nov 1, 2026',sha:'c4d981a',title:'Release 2.6.0'},{name:'2.5.0',date:'Oct 18, 2026',sha:'d85c2a0',title:'Release 2.5.0'}]},
+ {name:'(root)',items:[{name:'v2.4.0',date:'Oct 3, 2026',sha:'90ebc12',title:'Release 2.4.0'}]}
+];
+function build(el){
+ let view=el.dataset.screen,selected=0,tagKey='fix/2.6.1',branch='main';const collapsed=new Set();
+ const repo='<aside class="pane"><span class="pane-label">Repositories</span><div class="repos"><div class="repo current">devops-cli</div><div class="repo">api-service</div><div class="repo">infra</div><div class="repo">web-app</div></div><div class="repo-meta">Default: main<br><span class="good">● Enabled</span><br><br>4 repositories</div></aside>';
+ function draw(){
+ el.innerHTML='<div class="top"><span class="muted">Pipelines [1]</span><span class="muted">Pull requests [2]</span><span class="active">Repositories [3]</span><span class="context">acme / platform</span></div><div class="workspace">'+repo+'<main class="pane focus"><span class="pane-label">devops-cli</span><nav class="tabs" aria-label="Repository view">'+['overview','commits','tags'].map(x=>'<button data-tab="'+x+'" class="'+(view===x?'chosen':'')+'">'+x[0].toUpperCase()+x.slice(1)+'</button>').join('')+'</nav><div class="content"></div></main></div><div class="footer"></div>';
+ const content=el.querySelector('.content');
+ if(view==='commits'){
+ content.innerHTML='<div class="tools"><select class="branch" aria-label="Branch"><option value="main">⑂ main</option><optgroup label="fix/"><option value="fix/2.6.1">2.6.1</option><option value="fix/2.5.3">2.5.3</option></optgroup><optgroup label="release/"><option value="release/2.6.0">2.6.0</option></optgroup></select><span>Newest first ↓</span></div><div class="branch-path muted" style="padding:0 5px;font-size:10px"></div><div class="commit-list"></div><div class="preview"></div>';
+ el.querySelector('.branch').value=branch;
+ const available=branch==='fix/2.5.3'?[{day:'Oct 24, 2026',title:'Fix pipeline reconnect on timeout',sha:'3d9b5e1',author:'Dominic',time:'10:25',files:'2 files changed · +26 −8',ref:'fix/2.5.3'},...commits.slice(4)]:branch==='release/2.6.0'?commits.slice(2):commits;
+ selected=Math.min(selected,available.length-1);
+ el.querySelector('.branch-path').textContent='Branch: '+branch;
+ let day='';available.forEach((c,i)=>{if(c.day!==day){const label=document.createElement('div');label.className='section-label';label.textContent='── '+c.day+' ──';el.querySelector('.commit-list').append(label);day=c.day}const row=document.createElement('button');row.className='commit'+(selected===i?' selected':'');row.innerHTML='<span class="title">'+c.title+'</span><span class="meta"><span>'+c.author+' · '+c.time+'</span><span class="hash">'+c.sha+'</span></span>';row.onclick=()=>{selected=i;draw()};el.querySelector('.commit-list').append(row)});
+ const c=available[selected];el.querySelector('.preview').innerHTML='<div class="heading">Selected commit · '+c.sha+'</div>'+c.title+'<br><span class="muted">'+c.files+(c.ref?' · tag: '+c.ref:'')+'</span>';
+ el.querySelector('.branch').onchange=e=>{branch=e.target.value;selected=0;draw()};
+ }else if(view==='tags'){
+ content.innerHTML='<div class="tools"><span>Group: path /</span><span>Newest first in each group ↓</span></div><div class="tag-list"></div><div class="preview"></div>';
+ let chosen=null;
+ groups.forEach(g=>{const group=document.createElement('button');group.className='group';group.setAttribute('aria-expanded',String(!collapsed.has(g.name)));group.innerHTML='<span>'+(collapsed.has(g.name)?'▸ ':'▾ ')+g.name+'</span><small>'+g.items.length+' tags</small>';group.onclick=()=>{collapsed.has(g.name)?collapsed.delete(g.name):collapsed.add(g.name);draw()};el.querySelector('.tag-list').append(group);g.items.forEach((t,i)=>{const full=(g.name==='(root)'?'':g.name)+t.name;if(full===tagKey)chosen={...t,full};if(collapsed.has(g.name))return;const row=document.createElement('button');row.className='tag'+(tagKey===full?' selected':'');row.innerHTML='<span class="tag-name"><span class="tree">'+(i===g.items.length-1?'└':'├')+'─</span><span>'+t.name+'</span></span><span class="meta">'+t.date+' <span class="hash">'+t.sha+'</span></span>';row.onclick=()=>{tagKey=full;draw()};el.querySelector('.tag-list').append(row)})});
+ el.querySelector('.preview').innerHTML='<div class="heading">Selected tag · '+chosen.full+'</div>'+chosen.title+'<br><span class="muted">Commit '+chosen.sha+' · '+chosen.date+'</span>';
+ }else{content.innerHTML='<div class="overview">Repository: devops-cli<br>Default branch: main<br>Status: <span class="good">Enabled</span><br><br><span class="muted">HTTPS clone</span><br>https://dev.azure.com/acme/platform/_git/devops-cli<br><br><span class="muted">Switch to Commits or Tags above.</span></div>'}
+ el.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{view=b.dataset.tab;draw()});
+ el.querySelector('.footer').innerHTML=(view==='tags'?['↑↓ select','←→ fold','Enter commit']:view==='commits'?['↑↓ select','Enter diff','r branch']:['↑↓ select','Enter open']).concat(['[ / ] tab','w pane','b browser','F5 refresh']).map(x=>'<span>'+x+'</span>').join('');
+ }
+ draw();
+}
+document.querySelectorAll('.terminal').forEach(build);
+</script>
+</body>
+</html>

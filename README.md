@@ -9,7 +9,7 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.4.1
+mise use -g github:DominicWrege/devops-cli@0.4.2
 devops login
 ```
 
@@ -97,7 +97,7 @@ pane or dialog; `.` expands it, and `h` opens scrollable keyboard help.
 | Left/Right | Focus the list or detail pane |
 | Shift+Left/Right | Pan long lines and table cells |
 | `F7` / `F8` or `[` / `]` | Previous / next tab in PR details |
-| `d` | Open changed files in PR details; select a file and press `Enter` for its diff |
+| `d` / `c` / `t` / `f` | PR Description / Comments / Status / Files; Enter on a file opens its diff |
 | `b` / `o` | Open the selected repository or PR in the browser / its local checkout in an editor |
 | `.` / `h` | Expand commands / open keyboard help |
 | `F5` | Refresh lists and details |
@@ -122,10 +122,11 @@ a preview on the right. `Enter` opens the selected PR.
 
 PR details put identity and review status on the left and description/comments/status/files
 tabs in a full-height right pane. Narrow terminals show the content beneath a
-compact header. Use `F7` / `F8` (or `[` / `]`) to switch detail tabs, `w` or `F6` to change pane
+compact header. Press `d` for Description, `c` for Comments, `t` for Status, or `f`
+for Files. `[` / `]` and `F7` / `F8` also cycle detail tabs. Use `w` or `F6` to change pane
 focus, and Up/Down or `PgUp`/`PgDn` to scroll. `Esc` returns to the PR list.
 
-Press `d` for changed files. Select a file with Up/Down, then press `Enter` to load
+Press `f` for changed files. Select a file with Up/Down, then press `Enter` to load
 its unified diff. Additions are green and deletions red. `w` or `F6` switches
 between files and the diff; scroll with Up/Down or `PgUp`/`PgDn` and pan long diff
 lines with Shift+Left/Right. Narrow terminals stack the file list above the diff.
@@ -135,6 +136,9 @@ files, submodules, and text over 1 MiB per side show a message directing you to
 the browser. No local checkout is needed for the TUI diff.
 
 In PR details, press `v` to approve or `?` to open the actions menu for commenting, editing, merging, abandoning, reactivating, or creating a PR. The existing action shortcuts still work. To approve an assigned review, press `i` in the PR list, open the PR with `Enter`, then press `v`. Approval, merge, and abandon ask for confirmation. Press `n` in the PR list or details to create a PR.
+
+To add a comment from PR details, press `?`, then `c`. The direct `c` key opens
+the Comments tab.
 
 Approval and assigned reviews look up your identity within the selected
 organization and support PAT authentication. Voting requires a PAT with
@@ -148,12 +152,38 @@ current branch; it does not clone, fetch, or switch to the PR branch.
 ### Repositories
 
 Press `3` to browse repositories in the current project. Select one with Up/Down;
-its default branch, status, and HTTPS, SSH, and web URLs appear in the details pane.
+its Info tab shows the default branch, status, and HTTPS, SSH, and web URLs.
 `Enter` or Right focuses details; Left returns to the list. Narrow terminals place
-details below the list. `F5` refreshes; switching sections preserves your selection.
+details below the list. Press `i` for Info, `c` for Commits, or `t` for Tags.
+`[` / `]` and `F7` / `F8` also cycle these tabs. Switching sections preserves the
+repository, tab, branch, and selections.
+
+Commits shows the selected branch's history, newest first and grouped by commit
+day. Press `r` to pick a branch, grouped by slash-separated paths. History loads
+100 commits at a time; `m` loads older commits from the same snapshot. `F5` reads
+the branch's latest history. Selecting another branch keeps each branch's loaded
+history and selected commit for this session.
+
+Tags uses collapsible path groups: `fix/2.6.1` appears as `2.6.1` under `fix/`.
+Nested paths create nested groups, and tags without a path appear under `(root)`
+when there are also folders. Folders sort alphabetically; tags within each folder
+sort newest first by their target commit's committer date, with unknown dates
+last. This works for annotated and lightweight tags. The preview shows the full
+tag name and target commit. On a folder, Enter toggles it and Left/Right collapses
+or expands it; Left on a tag selects its folder. Use `w` or `F6` to return to the
+repository list.
+
+On a commit or tag, Enter opens the commit's changed files. Select a file and press
+Enter for its diff; `w` / `F6` switches between files and diff, and Esc returns to
+history. Diffs compare against the commit's first parent and need no local
+checkout. Binary files and large text files follow the PR diff limits.
+In Commits, Tags, and commit details, `b` opens the selected commit in the browser.
+`F5` refreshes the focused repository list, tab, branch picker, or commit details;
+existing rows remain visible while a refresh is pending.
 
 Press `b` to open the selected repository in your default browser, or `o` to open
-an existing checkout in your editor. The editor form accepts an executable name
+an existing checkout in your editor from the repository list or Info tab.
+The editor form accepts an executable name
 such as `code` or `cursor`, or its full path, without command-line arguments or
 surrounding quotes. Git must be installed to resolve the checkout root. Choose
 the directory belonging to the selected repository; the CLI does not match Git

@@ -18,7 +18,22 @@ pub(super) fn render(
     let changes = &pr["detailChanges"];
     let rows = pr_rows(&changes["files"]);
     let layout = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(area);
-    frame.render_widget(Paragraph::new(format!("#{} · F7/F8: Description | Comments | Status | [Files]\nIteration {} · Enter: load diff · w: files/diff", scalar(&pr["pullRequestId"]), scalar(&changes["iteration"]))), layout[0]);
+    let header = if let Some(label) = pr["detailLabel"].as_str() {
+        Text::raw(format!(
+            "{}\nEnter: load diff · w: files/diff · Esc: history",
+            output::cell(label)
+        ))
+    } else {
+        Text::from(vec![
+            pr_tabs(3, area.width),
+            Line::raw(format!(
+                "PR #{} · Iteration {} · Enter: diff · w: files/diff",
+                scalar(&pr["pullRequestId"]),
+                scalar(&changes["iteration"])
+            )),
+        ])
+    };
+    frame.render_widget(Paragraph::new(header), layout[0]);
     let panes = if area.width >= 90 {
         Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)])
             .split(layout[1])
