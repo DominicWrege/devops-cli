@@ -8,7 +8,7 @@ Status: initial implementation and model/render tests complete; live tenant usab
 - Show tasks in a left sidebar, with their execution status.
 - Use the main pane for task logs, following the general layout of Azure DevOps' web UI.
 - Follow execution and live log output within the selected job until the user selects another task or scrolls back.
-- Manual task selection or scrolling back pauses automatic following. Preserve the selected task and reading position while paused.
+- Manual task selection pauses automatic task selection. A selected running or pending task still follows new log output; completed tasks open at the beginning of their logs. Scrolling logs pauses both kinds of following and preserves the selected task and reading position.
 - Press `f` to resume following within the selected job.
 - The pipeline TUI is observation-only. Triggering, rerunning/retrying, canceling, and registering pipelines stay in the CLI; do not add these write controls to the pipeline screen.
 
@@ -24,7 +24,7 @@ Status: initial implementation and model/render tests complete; live tenant usab
 - The run viewer retains the originating list. Select another run in its runs pane
   with Enter, or press Esc to return to that list. Tab still switches sections.
 
-- Use Up/Down to select a stage, job, or task. Selecting a job then pressing `f` follows tasks within that job. PageUp/PageDown scrolls logs and pauses following.
+- Use Up/Down to select a stage, job, or task. Selecting a job then pressing `f` follows tasks within that job. In the logs pane, PageUp/PageDown scrolls logs and pauses following.
 - Poll status, timeline, and incremental log pages every two seconds. No push-streaming dependency.
 - Fetch at most 2,000 log lines at a time. Retain at most 10,000 lines or 2 MiB for the selected task; truncate individual lines over 64 KiB. Show the first retained line offset in the title.
 - Preserve absolute line offsets while paused. If retention evicts the reading position, clamp it to the first retained line instead of pretending the evicted text is still available.

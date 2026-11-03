@@ -55,6 +55,7 @@ pub struct Viewer {
     pub selected: Option<String>,
     pub job: Option<String>,
     pub follow: bool,
+    pub follow_logs: bool,
     pub log_key: Option<LogKey>,
     pub log: LogBuffer,
     pub top: u64,
@@ -71,6 +72,7 @@ impl Viewer {
             selected: None,
             job: None,
             follow: true,
+            follow_logs: true,
             log_key: None,
             log: LogBuffer::default(),
             top: 0,
@@ -157,6 +159,9 @@ impl Viewer {
             .saturating_add_signed(delta)
             .min(self.records.len() - 1);
         self.selected = Some(text(&self.records[index], "id").into());
+        let record = &self.records[index];
+        self.follow_logs = text(record, "type").eq_ignore_ascii_case("task")
+            && text(record, "state") != "completed";
         if let Some(job) = self.job_for(text(&self.records[index], "id")) {
             self.job = Some(job);
         }
@@ -216,6 +221,7 @@ impl Viewer {
     }
     pub fn scroll(&mut self, delta: i64) {
         self.follow = false;
+        self.follow_logs = false;
         let log = self.visible_log();
         self.top = self
             .top
@@ -224,6 +230,7 @@ impl Viewer {
     }
     pub fn resume(&mut self) {
         self.follow = true;
+        self.follow_logs = true;
         self.update(self.run.clone(), self.records.clone());
     }
     fn reset_log_if_changed(&mut self) {
@@ -256,7 +263,7 @@ impl Viewer {
         let log = self.visible_log();
         let base = log.base;
         let next = log.next;
-        if self.follow {
+        if self.follow_logs {
             self.top = next.saturating_sub(height as u64).max(base);
         }
         self.top = self.top.clamp(base, next.saturating_sub(1).max(base));
@@ -333,6 +340,73 @@ mod tests {
         assert_eq!(viewer.selected.as_deref(), Some("b1"));
         viewer.resume();
         assert_eq!(viewer.job.as_deref(), Some("b"));
+    }
+    #[test]
+    fn selected_running_task_follows_output_without_switching_tasks() -> anyhow::Result<()> {
+        use anyhow::Context;
+        let mut viewer = Viewer::new(1);
+        viewer.update(Value::Null, records());
+        viewer.navigate(2);
+        let key = viewer.log_key.clone().context("Selected task log")?;
+        viewer.accept_log(key.clone(), 0, (0..30).map(|n| n.to_string()).collect());
+        assert!(!viewer.follow);
+        assert!(viewer.follow_logs);
+        assert_eq!(viewer.offset(10), 20);
+
+        viewer.accept_log(key.clone(), 30, vec!["new output".into()]);
+        assert_eq!(viewer.offset(10), 21);
+        viewer.scroll(-5);
+        viewer.accept_log(key, 31, vec!["more output".into()]);
+        assert_eq!(viewer.offset(10), 16);
+        assert!(!viewer.follow_logs);
+
+        viewer.resume();
+        assert_eq!(viewer.offset(10), 22);
+        let mut timeline = records();
+        timeline[3]["state"] = json!("completed");
+        timeline.push(
+            json!({"id":"b2","type":"Task","parentId":"b","state":"inProgress","log":{"id":3}}),
+        );
+        viewer.navigate(0);
+        viewer.update(Value::Null, timeline);
+        assert_eq!(viewer.selected.as_deref(), Some("b1"));
+        assert_eq!(viewer.offset(10), 22);
+        Ok(())
+    }
+
+    #[test]
+    fn selected_task_follows_live_tail_until_scrolled() {
+        let mut viewer = Viewer::new(1);
+        viewer.update(Value::Null, records());
+        viewer.navigate(2);
+        viewer.accept_live(crate::live::Event::Lines {
+            record: "b1".into(),
+            lines: (0..30).map(|n| n.to_string()).collect(),
+        });
+        assert_eq!(viewer.offset(10), 20);
+        viewer.scroll(-5);
+        viewer.accept_live(crate::live::Event::Lines {
+            record: "b1".into(),
+            lines: vec!["new output".into()],
+        });
+        assert_eq!(viewer.offset(10), 15);
+        viewer.resume();
+        assert_eq!(viewer.offset(10), 21);
+    }
+
+    #[test]
+    fn selecting_completed_task_opens_log_at_beginning() -> anyhow::Result<()> {
+        use anyhow::Context;
+        let mut viewer = Viewer::new(1);
+        let mut timeline = records();
+        timeline[3]["state"] = json!("completed");
+        viewer.update(Value::Null, timeline);
+        viewer.navigate(2);
+        let key = viewer.log_key.clone().context("Selected task log")?;
+        viewer.accept_log(key, 0, (0..30).map(|n| n.to_string()).collect());
+        assert!(!viewer.follow_logs);
+        assert_eq!(viewer.offset(10), 0);
+        Ok(())
     }
     #[test]
     fn stale_log_is_ignored_and_attempt_changes_reset() -> anyhow::Result<()> {

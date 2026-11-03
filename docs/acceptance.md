@@ -2,6 +2,21 @@
 
 No live Azure DevOps writes have been run by the implementation session. Use an explicitly approved disposable repository, PR, and pipeline for these checks.
 
+## 0.4.6 verification
+
+Local Windows checks cover 156 passing Rust tests (one credential-dependent test
+ignored), formatting, Clippy, and five release-packaging tests. TUI tests cover
+inline path suggestions, completion with spaces, editor paths, missing-path
+recovery, field navigation, and narrow layouts. Mouse tests cover selection,
+scrolling, section switching, double-clicks, resizing, and modal isolation.
+Pipeline tests cover following a selected running task, live output, pausing on
+scroll, and opening completed task logs at the beginning.
+
+Folder dialogs use a fixed height capped by the terminal and no background
+highlight on path input. Live tenant operations and local Linux/WSL integration
+remain untested for this patch. CI checks Windows, Linux musl, Rust 1.88, release
+builds, and installation of published archives.
+
 ## 0.4.5 verification
 
 Local Windows checks cover 146 passing Rust tests (one credential-dependent test

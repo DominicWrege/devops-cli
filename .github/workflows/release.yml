@@ -109,15 +109,15 @@ jobs:
           \`mise use -g github:$GH_REPO@$VERSION\`
 
           Start setup with \`devops login\`. Enter your organization and a personal access token at the masked prompt; no Entra app registration is required. Entra sign-in remains available with \`--entra\`.
-          Version 0.4.5 adds CLI tag creation and deletion and widens the repository list in the TUI.
+          Version 0.4.6 improves local checkout selection, mouse navigation, and pipeline log following.
 
-          - Use devops tag create NAME --repo REPO --target SHA to create a lightweight remote tag at a full 40-character commit/object SHA.
-          - Use devops tag delete NAME --repo REPO --yes to delete a remote tag. Deletion finds the exact tag across paginated results and uses its unpeeled object ID to reject concurrent changes, including for annotated tags.
-          - Both tag commands accept -R as shorthand for --repo and support --json. Invalid names, targets, and missing deletion acknowledgement fail before authentication.
-          - The repository TUI list now uses 40% of wide terminals, up from 25%, giving repository names more room.
+          - Local checkout and editor paths show suggestions as you type. Use Up/Down to select, Tab to complete, and Shift+Tab to change fields. Home-directory paths are supported; the separate F2 browser is removed.
+          - Folder dialogs keep a fixed height and show the current path without a background highlight.
+          - Click section tabs, select list rows, double-click to open items, and use the mouse wheel to navigate lists or scroll panes.
+          - Selecting a running pipeline task keeps its logs following while pausing automatic task selection. Completed tasks open at the start of their logs; scrolling pauses following.
 
           Text diffs are limited to 1 MiB per side. Binary files and submodules direct you to the browser.
-          Live tenant tag writes and local Linux/WSL integration were not retested for this patch; mock API, CLI, and TUI tests cover these changes.
+          Live tenant operations and local Linux/WSL integration were not retested for this patch; automated CLI and TUI tests cover these changes.
 
           Linux uses a static musl binary, with no glibc requirement. ARM64 and macOS builds are not provided.
           Live tenant authentication acceptance is still required. See the README and docs/acceptance.md.
