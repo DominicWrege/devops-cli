@@ -9,7 +9,7 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.4.4
+mise use -g github:DominicWrege/devops-cli@0.4.6
 devops login
 ```
 
@@ -77,8 +77,12 @@ pull requests on subsequent launches. If you are signed in but have no selected
 project, it opens the project picker without asking for your token again.
 Press `s` in the workspace for Settings, then choose Current project or Account.
 Settings also has a Code base path for the current organization and project.
-Set it to the folder containing your local repositories; `F2` opens a directory
-browser. New editor forms start at the matching repository folder when it exists,
+Set it to the folder containing your local repositories. Path fields show matching
+folders as you type or paste. Use Up/Down to select a suggestion and `Tab` to
+complete it. `Shift+Tab` changes fields; `Ctrl+U` clears the current field.
+Paths starting with `~/` expand to your home directory. To open a local checkout,
+select its repository or PR and press `o`, then enter the local checkout path.
+New editor forms start at the matching repository folder when it exists,
 or at the code base folder. Saved checkout choices take precedence. Leave the
 setting blank to clear it. Code base paths are saved in `settings.json`.
 The project picker opens over your current view; `Esc` restores its selection and
@@ -108,6 +112,13 @@ pane or dialog; `.` expands it, and `h` opens scrollable keyboard help.
 | `F5` | Refresh lists and details |
 | `Esc` | Cancel a pending read, close a form, or leave the current view |
 | `q` | Quit outside forms |
+
+Mouse support is enabled in the TUI. Click the top section tabs to switch views,
+click list rows to select them, and double-click to open them. Click a pane to
+focus it; the mouse wheel navigates the list or scrolls the pane under the pointer.
+In the pipeline viewer, clicking a task pauses automatic task selection, and
+scrolling logs pauses following. Forms, settings, and confirmation dialogs use
+the keyboard.
 
 Loaded lists and activity stay cached for the TUI session and keep your selected
 row. Recent runs reuse the loaded pipeline catalog between automatic refreshes;
@@ -155,10 +166,10 @@ From the PR list or details, `b` opens the PR in your default browser, where you
 can review changes and comments in Azure DevOps. `o` opens a form for an existing
 local checkout directory and a GUI editor executable. It opens that checkout's
 current branch; it does not clone, fetch, or switch to the PR branch.
-Press `F2` on either path field to browse. Use Up/Down to select an entry,
-`Enter` to open a folder or choose an editor file, Backspace to go to the parent,
-and `Ctrl+S` to choose the current folder. `Esc` returns to the form without
-changing its path.
+Path suggestions appear directly below the active field. Use Up/Down to select
+a match and `Tab` to complete it, or keep typing. `Shift+Tab` changes fields.
+Enter `code` for VS Code, `zed` for Zed, or a full editor executable path.
+Press `Enter` or `Ctrl+S` to open the checkout; `Esc` cancels.
 
 ### Repositories
 

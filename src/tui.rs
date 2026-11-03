@@ -11,8 +11,8 @@ use clap::ValueEnum;
 use crossterm::{
     cursor::Show,
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
-        KeyModifiers,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEventKind, KeyModifiers,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -34,6 +34,7 @@ mod chrome;
 mod file_browser;
 #[cfg(test)]
 mod interaction_tests;
+mod mouse;
 mod repositories;
 mod review;
 use chrome::{command_rows, draw_commands, draw_header, pane_block, popup, selection_style};
@@ -49,7 +50,12 @@ impl TerminalGuard {
         );
         enable_raw_mode()?;
         let guard = Self;
-        execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
+        execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture
+        )?;
         let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
         Ok((guard, terminal))
     }
@@ -60,6 +66,7 @@ impl Drop for TerminalGuard {
         let _ = execute!(
             io::stdout(),
             DisableBracketedPaste,
+            DisableMouseCapture,
             LeaveAlternateScreen,
             Show
         );
@@ -161,12 +168,12 @@ struct Form {
     kind: FormKind,
     fields: Vec<Field>,
     selected: usize,
-    browser: Option<file_browser::Browser>,
+    completion: Option<file_browser::Completion>,
 }
 impl Form {
     fn new(kind: FormKind, fields: Vec<(&'static str, String)>) -> Self {
         let pat = matches!(kind, FormKind::PatIdentity);
-        Self {
+        let mut form = Self {
             kind,
             fields: fields
                 .into_iter()
@@ -178,8 +185,10 @@ impl Form {
                 })
                 .collect(),
             selected: 0,
-            browser: None,
-        }
+            completion: None,
+        };
+        form.complete_path();
+        form
     }
     fn value(&self, i: usize) -> Result<&str> {
         self.fields
@@ -199,6 +208,13 @@ impl Form {
             FormKind::OpenEditor(_) => Some(file_browser::Kind::File),
             _ => None,
         }
+    }
+    fn complete_path(&mut self) {
+        self.completion = self.browser_kind().and_then(|kind| {
+            self.fields
+                .get(self.selected)
+                .and_then(|field| file_browser::Completion::new(&field.value, kind).ok())
+        });
     }
     fn command(&self) -> Result<PrCommand> {
         let list = |i: usize| -> Result<Vec<String>> {
@@ -288,6 +304,7 @@ struct App {
     help_scroll: Option<u16>,
     expanded_commands: bool,
     viewport: Rect,
+    mouse: mouse::State,
     run_list: Option<RunList>,
     picker_return: Option<SavedView>,
     settings_menu: Option<usize>,
@@ -366,6 +383,7 @@ impl App {
             help_scroll: None,
             expanded_commands: false,
             viewport: Rect::new(0, 0, 120, 30),
+            mouse: mouse::State::default(),
             run_list: None,
             picker_return: None,
             settings_menu: None,
@@ -489,6 +507,7 @@ impl App {
         }));
     }
     fn set_screen(&mut self, screen: Screen) {
+        self.mouse = mouse::State::default();
         self.live = None;
         if !matches!(screen, Screen::Watch(_)) {
             self.run_list = None;
@@ -853,7 +872,6 @@ impl App {
                     })
                 })
                 .unwrap_or(std::env::current_dir()?);
-            let name = text(repo, "name").to_owned();
             self.form = Some(Form::new(
                 FormKind::OpenEditor(repo_url),
                 vec![
@@ -864,8 +882,7 @@ impl App {
                     ),
                 ],
             ));
-            self.status =
-                format!("Choose the existing checkout for {name}. Opens its current branch.");
+            self.status.clear();
         } else {
             let url = if is_pr {
                 crate::external::pr_url(&target, value)?
@@ -891,7 +908,7 @@ impl App {
             vec![("Code base directory", path)],
         ));
         self.status = format!(
-            "Code base for {} / {}. F2 to browse; blank to clear.",
+            "Code base for {} / {}. Type a path; Tab completes; blank to clear.",
             target.organization, target.project
         );
         Ok(())
@@ -1156,7 +1173,7 @@ impl App {
             if clear {
                 settings.code_base_paths.remove(key);
             } else {
-                let path = std::path::absolute(value)?;
+                let path = std::path::absolute(file_browser::expand_path(value))?;
                 ensure!(path.is_dir(), "Code base must be an existing directory");
                 settings.code_base_paths.insert(key.clone(), path);
             }
@@ -1172,11 +1189,21 @@ impl App {
             return Ok(());
         }
         if let FormKind::OpenEditor(repo_key) = &form.kind {
+            ensure!(
+                !form.value(0)?.is_empty(),
+                "Enter a local checkout directory"
+            );
+            let executable = form.value(1)?;
+            let executable = if executable.is_empty() {
+                String::new()
+            } else {
+                file_browser::expand_path(executable).display().to_string()
+            };
             let root = crate::external::open_editor(
                 &self.store,
                 repo_key,
-                std::path::Path::new(form.value(0)?),
-                form.value(1)?,
+                &file_browser::expand_path(form.value(0)?),
+                &executable,
             )?;
             self.form = None;
             self.status = format!(
@@ -1430,11 +1457,16 @@ impl App {
         if self.writing && (self.form.is_some() || matches!(self.screen, Screen::Repos(_))) {
             return Ok(false);
         }
+        if let Event::Mouse(event) = event {
+            return self.handle_mouse(event);
+        }
+        if let Event::Resize(_, _) = event {
+            self.mouse = mouse::State::default();
+        }
         if let Event::Paste(paste) = &event {
             if let Some(form) = &mut self.form {
-                if form.browser.is_none() {
-                    form.selected_field()?.value.push_str(&output::clean(paste));
-                }
+                form.selected_field()?.value.push_str(&output::clean(paste));
+                form.complete_path();
             } else if matches!(self.screen, Screen::Repos(_)) && self.repo_filter.editing {
                 self.repo_filter.query.push_str(&output::cell(paste));
                 self.apply_repository_filter()?;
@@ -1494,27 +1526,31 @@ impl App {
         }
         if let Some(form) = &mut self.form {
             ensure!(!form.fields.is_empty(), "Form has no fields");
-            if let Some(browser) = &mut form.browser {
-                match browser.key(key) {
-                    file_browser::Action::Stay => (),
-                    file_browser::Action::Cancel => form.browser = None,
-                    file_browser::Action::Selected(path) => {
-                        form.selected_field()?.value = path.display().to_string();
-                        form.browser = None;
+            if let Some(completion) = &mut form.completion
+                && !completion.paths.is_empty()
+            {
+                match key.code {
+                    KeyCode::Up => {
+                        completion.selected = completion.selected.saturating_sub(1);
+                        return Ok(false);
                     }
+                    KeyCode::Down => {
+                        completion.selected =
+                            (completion.selected + 1).min(completion.paths.len() - 1);
+                        return Ok(false);
+                    }
+                    KeyCode::Tab => {
+                        if let Some(value) = completion.value() {
+                            form.selected_field()?.value = value;
+                            form.complete_path();
+                        }
+                        return Ok(false);
+                    }
+                    _ => (),
                 }
-                return Ok(false);
             }
             match key.code {
                 KeyCode::Esc => self.form = None,
-                KeyCode::F(2) => {
-                    if let Some(kind) = form.browser_kind() {
-                        form.browser = Some(file_browser::Browser::new(
-                            form.value(form.selected)?,
-                            kind,
-                        )?);
-                    }
-                }
                 KeyCode::Tab | KeyCode::Down => {
                     form.selected = (form.selected + 1) % form.fields.len()
                 }
@@ -1543,6 +1579,9 @@ impl App {
                 }
                 KeyCode::Enter => self.submit()?,
                 _ => (),
+            }
+            if let Some(form) = &mut self.form {
+                form.complete_path();
             }
             return Ok(false);
         }
@@ -2293,19 +2332,12 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
     } else if app.confirm.is_some() || app.tag_confirm.is_some() {
         &["Confirm [y]", "Cancel [n/Esc]"]
     } else if let Some(form) = &app.form {
-        if form.browser.is_some() {
+        if form.browser_kind().is_some() {
             &[
-                "Open [Enter/→]",
-                "Choose [Ctrl+S]",
-                "Parent [Backspace/←]",
-                "Select [↑↓]",
-                "Cancel [Esc]",
-            ]
-        } else if form.browser_kind().is_some() {
-            &[
-                "Browse [F2]",
+                "Complete [Tab]",
                 "Save [Enter/Ctrl+S]",
-                "Field [Tab]",
+                "Field [Shift+Tab]",
+                "Select [↑↓]",
                 "Clear [Ctrl+U]",
                 "Cancel [Esc]",
             ]
@@ -2521,10 +2553,6 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
 }
 
 fn draw_form(frame: &mut Frame, area: Rect, form: &Form, status: &str) {
-    if let Some(browser) = &form.browser {
-        browser.draw(frame, area);
-        return;
-    }
     let width = area.width.min(76);
     let content_width = width.saturating_sub(4).max(1) as usize;
     let mut lines = Vec::new();
@@ -2538,7 +2566,9 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &Form, status: &str) {
                 Color::DarkGray
             }),
         ));
-        let style = if i == form.selected {
+        let style = if i == form.selected
+            && !matches!(form.kind, FormKind::OpenEditor(_) | FormKind::CodeBase(_))
+        {
             selection_style()
         } else {
             Style::default()
@@ -2558,13 +2588,45 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &Form, status: &str) {
             cursor = (Line::raw(&value).width() as u16, lines.len() as u16);
         }
         lines.push(Line::styled(value, style));
+        if i == form.selected
+            && let Some(completion) = &form.completion
+        {
+            let start = completion.selected.saturating_sub(3);
+            for (index, path) in completion.paths.iter().enumerate().skip(start).take(5) {
+                let label = format!(
+                    "{} {}{}",
+                    if index == completion.selected {
+                        "›"
+                    } else {
+                        " "
+                    },
+                    output::cell(&path.file_name().unwrap_or_default().to_string_lossy()),
+                    if path.is_dir() { "/" } else { "" }
+                );
+                lines.push(Line::styled(
+                    label,
+                    if index == completion.selected {
+                        selection_style()
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ));
+            }
+        }
         lines.push(Line::raw(""));
     }
     if matches!(form.kind, FormKind::PipelineEdit(_)) {
         lines.push(Line::raw("Folder: / for root, or /Team/Project."));
     }
     if form.browser_kind().is_some() {
-        lines.push(Line::raw("F2: browse for the selected path."));
+        lines.push(Line::raw(
+            "Type a path · ↑↓ select · Tab completes · Shift+Tab changes field",
+        ));
+    }
+    if matches!(form.kind, FormKind::OpenEditor(_)) {
+        lines.push(Line::raw(
+            "Editor: code (VS Code), zed, or a full executable path.",
+        ));
     }
     if !status.is_empty() {
         lines.push(Line::raw(output::cell(status)));
@@ -2581,7 +2643,12 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &Form, status: &str) {
         FormKind::Comment(_) => "Comment",
         FormKind::Merge(_) => "Merge strategy",
     };
-    let rect = popup(area, width, (lines.len() as u16 + 2).max(6));
+    let height = if matches!(form.kind, FormKind::OpenEditor(_) | FormKind::CodeBase(_)) {
+        18
+    } else {
+        (lines.len() as u16 + 2).max(6)
+    };
+    let rect = popup(area, width, height);
     let inner = pane_block(title, true).inner(rect);
     let scroll = cursor.1.saturating_sub(inner.height.saturating_sub(1));
     frame.render_widget(Clear, rect);
@@ -2600,6 +2667,7 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &Form, status: &str) {
 }
 
 fn draw(frame: &mut Frame, app: &mut App) {
+    app.mouse.regions.clear();
     let loading = app
         .loading_since
         .filter(|_| app.task.is_some())
@@ -2646,6 +2714,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
     draw_screen(frame, app, layout[1]);
     frame.render_widget(Paragraph::new(output::cell(&status_text)), layout[2]);
     draw_commands(frame, layout[3], &commands, expanded, expandable);
+    mouse::register(app, layout[0], layout[1]);
     if let Some(selected) = app.settings_menu {
         let popup = popup(area, 76, 7);
         frame.render_widget(Clear, popup);
@@ -2779,7 +2848,8 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 "Commit: Enter opens files; Enter on a file loads its diff.",
                 "Use Shift+arrows to pan long lines.",
                 "Forms: Tab changes fields. Ctrl+U clears a field.",
-                "Editor/code base paths: F2 browses; Ctrl+S chooses a path.",
+                "Editor/code base paths suggest folders as you type; Tab completes.",
+                "Up/Down selects suggestions; Shift+Tab changes fields.",
                 "Enter inserts a line in Description and Comment.",
                 "Ctrl+S submits; Enter also submits single-line fields.",
                 "Esc closes the current dialog or returns to the list.",
@@ -3158,7 +3228,8 @@ fn draw_screen(frame: &mut Frame, app: &mut App, area: Rect) {
             );
         }
         Screen::Watch(viewer) => {
-            draw_viewer(frame, area, viewer, app.pane_focus, app.pane_x, app.pane_y);
+            app.mouse.task_offset =
+                draw_viewer(frame, area, viewer, app.pane_focus, app.pane_x, app.pane_y);
             if let Some(list) = &mut app.run_list {
                 let rows = list
                     .items
@@ -3389,7 +3460,7 @@ fn draw_viewer(
     focus: usize,
     horizontal: [u16; 3],
     vertical: [u16; 3],
-) {
+) -> usize {
     let [tasks, logs, summary] = viewer_areas(area);
     let now = time::OffsetDateTime::now_utc();
     let elapsed = run_timer(&viewer.run, now);
@@ -3471,7 +3542,11 @@ fn draw_viewer(
         .unwrap_or_else(|| "Not started".into());
     let title = format!(
         "Task logs | {} | {task_timer}",
-        if viewer.follow { "Following" } else { "Paused" },
+        if viewer.follow_logs {
+            "Following"
+        } else {
+            "Paused"
+        },
     );
     let source = format!(
         "{} | from line {} | {}",
@@ -3489,6 +3564,7 @@ fn draw_viewer(
             .block(pane_block(title, focus == 1).title_bottom(source)),
         logs,
     );
+    selected.offset()
 }
 fn draw_pipeline_editor(frame: &mut Frame, area: Rect, app: &App, form: &Form, id: i32) {
     let name = if let Screen::Pipelines(items) = &app.screen {
