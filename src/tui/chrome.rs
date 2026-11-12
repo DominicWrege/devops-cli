@@ -34,6 +34,19 @@ pub(super) fn popup(area: Rect, width: u16, height: u16) -> Rect {
     )
 }
 
+pub(super) fn section_labels(width: u16) -> [&'static str; 4] {
+    if width >= 72 {
+        [
+            "Pipelines [1]",
+            "Pull requests [2]",
+            "Repositories [3]",
+            "Settings [4]",
+        ]
+    } else {
+        ["Pipes [1]", "PRs [2]", "Repos [3]", "Settings [4]"]
+    }
+}
+
 pub(super) fn draw_header(frame: &mut Frame, area: Rect, section: Option<usize>, context: &str) {
     let tab = |label, active| {
         Span::styled(
@@ -45,11 +58,7 @@ pub(super) fn draw_header(frame: &mut Frame, area: Rect, section: Option<usize>,
             },
         )
     };
-    let labels = if area.width >= 60 {
-        ["Pipelines [1]", "Pull requests [2]", "Repositories [3]"]
-    } else {
-        ["Pipes [1]", "PRs [2]", "Repos [3]"]
-    };
+    let labels = section_labels(area.width);
     let mut spans = Vec::new();
     for (index, label) in labels.into_iter().enumerate() {
         if index > 0 {

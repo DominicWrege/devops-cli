@@ -2,6 +2,22 @@
 
 No live Azure DevOps writes have been run by the implementation session. Use an explicitly approved disposable repository, PR, and pipeline for these checks.
 
+## 0.4.9 verification
+
+Local Windows checks cover 166 passing Rust tests (one credential-dependent test
+ignored), formatting, Clippy, five release-packaging tests, and a release build.
+TUI checks cover clickable PR tabs, Settings [4], Merge and Approve buttons with
+confirmation, disabled actions on inactive PRs, and narrow and wide layouts.
+Merge and Approve are displayed beside the detail tabs instead of in the footer.
+
+Diff checks cover automatic loading on first opening Files and on selection,
+keeping file-list focus, canceling stale reads, preserving diff scrolling after
+replies, and protecting submitted writes from navigation.
+
+GitHub Actions checks native Windows and static Linux builds, packaging, and
+installation of the published archives. Live tenant approval/merge operations,
+authentication, and local Linux/WSL integration were not retested for this patch.
+
 ## 0.4.8 verification
 
 Local Windows checks cover 162 passing Rust tests (one credential-dependent test
