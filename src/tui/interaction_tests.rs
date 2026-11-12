@@ -173,6 +173,72 @@ fn editor_shortcut_works_for_repos_and_prs_and_keeps_invalid_path_for_retry() ->
 }
 
 #[test]
+fn editor_remembers_the_last_successful_choice_when_reopened() -> Result<()> {
+    let (root, mut app) = fixture()?;
+    let checkout = root.path().join("checkout with spaces");
+    std::fs::create_dir(&checkout)?;
+    assert!(
+        std::process::Command::new("git")
+            .arg("init")
+            .arg(&checkout)
+            .output()?
+            .status
+            .success()
+    );
+    let previous = crate::external::EditorSettings {
+        executable: "previous-editor".into(),
+        ..Default::default()
+    };
+    app.store.write("editor.json", &previous)?;
+    app.screen = Screen::Repos(vec![json!({"name":"demo"})]);
+    app.handle(key(KeyCode::Char('o')))?;
+    // The test binary accepts the checkout path as a test filter and exits
+    // without opening a real editor or running any tests.
+    let executable = std::env::current_exe()?.display().to_string();
+    let form = app.form.as_mut().context("Editor form")?;
+    form.fields[0].value = checkout.display().to_string();
+    form.fields[1].value = executable.clone();
+    app.submit()?;
+    assert!(app.form.is_none());
+    let saved = crate::external::EditorSettings::load(&app.store)?;
+    assert_eq!(saved.executable, executable);
+    assert_eq!(
+        saved
+            .checkouts
+            .values()
+            .next()
+            .context("Saved checkout")?
+            .canonicalize()?,
+        checkout.canonicalize()?
+    );
+
+    app.handle(key(KeyCode::Char('o')))?;
+    let expected = std::env::var("DEVOPS_EDITOR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(executable.clone());
+    assert_eq!(
+        app.form.as_ref().context("Editor form")?.value(1)?,
+        expected
+    );
+    // A failed launch must keep the last editor that actually opened.
+    app.form.as_mut().context("Editor form")?.fields[1].value =
+        "devops-missing-test-editor-9271".into();
+    assert!(app.submit().is_err());
+    assert_eq!(
+        crate::external::EditorSettings::load(&app.store)?.executable,
+        executable
+    );
+    app.handle(key(KeyCode::Esc))?;
+    app.handle(key(KeyCode::Char('o')))?;
+    assert_eq!(
+        app.form.as_ref().context("Editor form")?.value(1)?,
+        expected
+    );
+    Ok(())
+}
+
+#[test]
 fn editor_paths_suggest_inline_complete_and_keep_fields_separate() -> Result<()> {
     let (root, mut app) = fixture()?;
     let checkout = root.path().join("demo checkout");

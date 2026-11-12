@@ -2623,11 +2623,6 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &Form, status: &str) {
             "Type a path · ↑↓ select · Tab completes · Shift+Tab changes field",
         ));
     }
-    if matches!(form.kind, FormKind::OpenEditor(_)) {
-        lines.push(Line::raw(
-            "Editor: code (VS Code), zed, or a full executable path.",
-        ));
-    }
     if !status.is_empty() {
         lines.push(Line::raw(output::cell(status)));
     }
@@ -2838,7 +2833,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 "Right enters details; Left returns to the list.",
                 "Use [ and ] or F7/F8 for PR and repository tabs.",
                 "Repository tabs: c Commits, i Info, t Tags.",
-                "Commits/Tags: n creates a tag at the selected commit (editable SHA).",
+                "Commits/Tags: n creates a tag at the selection in Commits (editable SHA).",
                 "Tags: e renames a tag; d or Delete asks to delete it.",
                 "Repository list: / filters names; Enter keeps it, Esc clears it.",
                 "PR tabs: d Description, c Comments, t Status, f Files.",

@@ -66,7 +66,7 @@ impl EditorSettings {
     }
 }
 
-fn command(executable: &str) -> Command {
+fn command(executable: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut command = Command::new(executable);
     command
         .stdin(Stdio::null())
@@ -78,6 +78,30 @@ fn command(executable: &str) -> Command {
         command.creation_flags(0x08000000); // CREATE_NO_WINDOW: keep helper consoles hidden.
     }
     command
+}
+
+fn spawn_editor(executable: &str, root: &Path) -> std::io::Result<std::process::Child> {
+    let result = command(executable).arg(root).spawn();
+    #[cfg(windows)]
+    if Path::new(executable).extension().is_none()
+        && matches!(&result, Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        // Windows editor commands can be batch launchers. Rust only adds .exe
+        // when searching PATH, so try their extensions explicitly as well.
+        for extension in ["cmd", "bat"] {
+            let launcher = Path::new(executable).with_extension(extension);
+            // Rust can start cmd.exe for a full batch path even when that
+            // script is missing. Keep searching rather than saving a bad path.
+            if launcher.components().count() > 1 && !launcher.is_file() {
+                continue;
+            }
+            let result = command(launcher).arg(root).spawn();
+            if !matches!(&result, Err(error) if error.kind() == std::io::ErrorKind::NotFound) {
+                return result;
+            }
+        }
+    }
+    result
 }
 
 pub fn checkout(path: &Path) -> Result<PathBuf> {
@@ -112,13 +136,12 @@ pub fn open_editor(
 ) -> Result<PathBuf> {
     ensure!(
         !executable.trim().is_empty(),
-        "Enter an editor executable, such as code or its full path"
+        "Enter an editor executable name or full path"
     );
     let root = checkout(path)?;
     let mut settings = EditorSettings::load(store)?;
-    let mut child = command(executable).arg(&root).spawn().context(
-        "Could not launch editor. Enter a GUI editor executable or full path, without arguments",
-    )?;
+    let mut child = spawn_editor(executable, &root)
+        .context("Could not launch editor. Check the executable name or full path")?;
     // Reap editor launchers without blocking the TUI or killing the editor on exit.
     std::thread::spawn(move || {
         let _ = child.wait();
@@ -181,6 +204,69 @@ mod tests {
         };
         assert!(open_editor(&store, "repo", &child, "devops-missing-test-editor-9271").is_err());
         assert!(!store.root.join("editor.json").exists());
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_editor_launchers_support_names_and_paths() -> Result<()> {
+        const LAUNCHER: &str = "DEVOPS_TEST_EDITOR_LAUNCHER";
+        if let Some(launcher) = std::env::var_os(LAUNCHER) {
+            let launcher = PathBuf::from(launcher);
+            let root = launcher
+                .parent()
+                .context("Launcher directory")?
+                .join("checkout & tools");
+            for executable in [
+                PathBuf::from("devops-fixture-editor-9271"),
+                launcher.with_extension(""),
+                launcher,
+            ] {
+                let mut child = spawn_editor(executable.to_str().context("Editor path")?, &root)?;
+                let status = child.wait()?;
+                ensure!(
+                    status.success(),
+                    "Editor launcher {executable:?} failed: {status}"
+                );
+                let marker = root.join("opened.txt");
+                assert_eq!(std::fs::read_to_string(&marker)?.trim(), "opened");
+                std::fs::remove_file(marker)?;
+            }
+            return Ok(());
+        }
+
+        let root = tempfile::tempdir()?;
+        for extension in ["cmd", "bat"] {
+            let bin = root.path().join(format!("{extension} editor bin"));
+            std::fs::create_dir_all(bin.join("checkout & tools"))?;
+            let launcher = bin.join(format!("devops-fixture-editor-9271.{extension}"));
+            std::fs::write(
+                &launcher,
+                "@echo off\r\nif not \"%~2\"==\"\" exit /b 2\r\n> \"%~1\\opened.txt\" echo opened\r\n",
+            )?;
+            let mut paths = vec![bin];
+            paths.extend(std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            ));
+            // Give only this test subprocess a fixture PATH; other tests keep
+            // their environment, and no real editor is opened.
+            let output = command(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "external::tests::windows_editor_launchers_support_names_and_paths",
+                ])
+                .env(LAUNCHER, launcher)
+                .env("PATH", std::env::join_paths(paths)?)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()?;
+            ensure!(
+                output.status.success(),
+                "Editor launcher test failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         Ok(())
     }
 

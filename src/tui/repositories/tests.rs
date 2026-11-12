@@ -130,6 +130,56 @@ fn tag_forms_use_selected_commits_and_validate_names_targets_and_duplicates() ->
     Ok(())
 }
 
+#[test]
+fn new_tags_use_the_commit_selection_instead_of_an_existing_tag_target() -> Result<()> {
+    let (_root, mut app) = super::super::tests::fixture()?;
+    let id = setup_tag_actions(&mut app)?;
+    let newest = format!("bee53e3{}", "0".repeat(33));
+    let older = format!("2823f99{}", "0".repeat(33));
+    {
+        let view = app.repo_views.get_mut(&id).context("View")?;
+        let history = view.histories.get_mut("main").context("History")?;
+        history.commits[0]["commitId"] = json!(newest);
+        history.commits[1]["commitId"] = json!(older);
+        view.tags = Some(vec![tag("2.1.0", &older, "2026-08-25T09:00:00Z")]);
+        view.tags_selection.select(Some(0));
+    }
+    for (selection, expected) in [(0, &newest), (1, &older)] {
+        app.repo_views
+            .get_mut(&id)
+            .context("View")?
+            .histories
+            .get_mut("main")
+            .context("History")?
+            .selection
+            .select(Some(selection));
+        for tab in ['c', 't'] {
+            app.handle(key(KeyCode::Char(tab)))?;
+            app.handle(key(KeyCode::Char('n')))?;
+            assert_eq!(
+                app.form.as_ref().context("Create form")?.value(1)?,
+                expected
+            );
+            app.handle(key(KeyCode::Esc))?;
+        }
+    }
+    // Without loaded history, require an explicit SHA rather than copying a tag.
+    app.repo_views
+        .get_mut(&id)
+        .context("View")?
+        .histories
+        .clear();
+    app.handle(key(KeyCode::Char('n')))?;
+    assert!(
+        app.form
+            .as_ref()
+            .context("Create form")?
+            .value(1)?
+            .is_empty()
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn tag_deletion_requires_confirmation_and_submitted_writes_block_navigation() -> Result<()> {
     let (_root, mut app) = super::super::tests::fixture()?;

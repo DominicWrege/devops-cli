@@ -109,12 +109,11 @@ jobs:
           \`mise use -g github:$GH_REPO@$VERSION\`
 
           Start setup with \`devops login\`. Enter your organization and a personal access token at the masked prompt; no Entra app registration is required. Entra sign-in remains available with \`--entra\`.
-          Version 0.4.6 improves local checkout selection, mouse navigation, and pipeline log following.
+          Version 0.4.7 fixes Windows editor launching and new tag targets.
 
-          - Local checkout and editor paths show suggestions as you type. Use Up/Down to select, Tab to complete, and Shift+Tab to change fields. Home-directory paths are supported; the separate F2 browser is removed.
-          - Folder dialogs keep a fixed height and show the current path without a background highlight.
-          - Click section tabs, select list rows, double-click to open items, and use the mouse wheel to navigate lists or scroll panes.
-          - Selecting a running pipeline task keeps its logs following while pausing automatic task selection. Completed tasks open at the start of their logs; scrolling pauses following.
+          - Open in editor resolves Windows .cmd and .bat launchers from short names and full paths, including paths with spaces.
+          - The editor form restores the last successfully launched editor. Failed launch attempts keep the saved choice, and the editor-specific help line is removed.
+          - Creating a tag from Commits or Tags uses the commit selected in Commits instead of an existing tag's older target. The SHA remains editable; unloaded history requires an explicit SHA.
 
           Text diffs are limited to 1 MiB per side. Binary files and submodules direct you to the browser.
           Live tenant operations and local Linux/WSL integration were not retested for this patch; automated CLI and TUI tests cover these changes.

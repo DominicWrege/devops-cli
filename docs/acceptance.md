@@ -2,6 +2,22 @@
 
 No live Azure DevOps writes have been run by the implementation session. Use an explicitly approved disposable repository, PR, and pipeline for these checks.
 
+## 0.4.7 verification
+
+Local Windows checks cover 159 passing Rust tests (one credential-dependent test
+ignored), formatting, Clippy, and five release-packaging tests. Editor regression
+tests launch fixture .cmd and .bat scripts by short name and full path, including
+paths with spaces and shell metacharacters. TUI checks cover restoring the last
+successfully launched editor and preserving it after a failed launch.
+
+Tag regression tests verify that creation from Commits and Tags uses the commit
+selected in the current branch history, keeps the SHA editable, and requires an
+explicit SHA when history is unavailable.
+
+Live tenant operations and local Linux/WSL desktop integration were not retested
+for this patch. CI checks Windows, Linux musl, Rust 1.88, release builds, and
+installation of published archives.
+
 ## 0.4.6 verification
 
 Local Windows checks cover 156 passing Rust tests (one credential-dependent test
