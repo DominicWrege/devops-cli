@@ -9,7 +9,7 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.4.6
+mise use -g github:DominicWrege/devops-cli@0.4.7
 devops login
 ```
 
@@ -168,7 +168,7 @@ local checkout directory and a GUI editor executable. It opens that checkout's
 current branch; it does not clone, fetch, or switch to the PR branch.
 Path suggestions appear directly below the active field. Use Up/Down to select
 a match and `Tab` to complete it, or keep typing. `Shift+Tab` changes fields.
-Enter `code` for VS Code, `zed` for Zed, or a full editor executable path.
+Enter your editor's executable name or full path, without arguments.
 Press `Enter` or `Ctrl+S` to open the checkout; `Esc` cancels.
 
 ### Repositories
@@ -201,7 +201,9 @@ or expands it; Left on a tag selects its folder. Use `w` or `F6` to return to th
 repository list.
 
 In Commits or Tags, press `n` to create a lightweight tag. Enter its name and a
-full commit SHA; the SHA defaults to the selected commit when available.
+full commit SHA; the SHA defaults to the selection in Commits, including when
+creating from Tags. With the newest commit selected, the new tag uses that
+commit rather than an existing tag's older target. You can edit the SHA.
 In Tags, select an individual tag and press `e` to rename it, or `d` / Delete to
 delete it after confirmation. Renaming preserves the tag object and annotations:
 it creates the new name before deleting the old one. If deletion fails, both
@@ -219,14 +221,14 @@ existing rows remain visible while a refresh is pending.
 
 Press `b` to open the selected repository in your default browser, or `o` to open
 an existing checkout in your editor from the repository list or Info tab.
-The editor form accepts an executable name
-such as `code` or `cursor`, or its full path, without command-line arguments or
-surrounding quotes. Git must be installed to resolve the checkout root. Choose
-the directory belonging to the selected repository; the CLI does not match Git
-remotes automatically. The directory and editor are remembered in
-`~/.config/devops/editor.json`. `DEVOPS_EDITOR` overrides the default executable;
-otherwise it uses the saved choice, or `code` initially. Use a GUI editor because
-the TUI keeps control of the terminal.
+The editor form accepts an executable name or its full path, without command-line
+arguments or surrounding quotes. Windows batch launchers are supported, including
+names entered without `.cmd` or `.bat`. Git must be installed to resolve the
+checkout root. Choose the directory belonging to the selected repository; the
+CLI does not match Git remotes automatically. The directory and editor are saved
+after a successful launch in `~/.config/devops/editor.json`. Reopening the form
+restores your last editor. `DEVOPS_EDITOR` overrides the saved choice; the initial
+default is `code`. Use a GUI editor because the TUI keeps control of the terminal.
 
 ### Pipelines and live logs
 

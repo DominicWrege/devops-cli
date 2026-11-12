@@ -37,10 +37,12 @@ impl App {
             )]
         } else {
             let view = self.repository_view().context("Open a repository first")?;
+            // The Tags selection points at an existing release, which may be old.
+            // New tags use the commit chosen in the current branch's history.
             let target = view
-                .selected_commit()
-                .or_else(|| {
-                    let history = view.histories.get(&view.branch)?;
+                .histories
+                .get(&view.branch)
+                .and_then(|history| {
                     history
                         .commits
                         .get(history.selection.selected().unwrap_or(0))?["commitId"]
