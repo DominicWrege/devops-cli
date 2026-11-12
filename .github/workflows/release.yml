@@ -109,12 +109,12 @@ jobs:
           \`mise use -g github:$GH_REPO@$VERSION\`
 
           Start setup with \`devops login\`. Enter your organization and a personal access token at the masked prompt; no Entra app registration is required. Entra sign-in remains available with \`--entra\`.
-          Version 0.4.8 adds automatic cloning when opening a missing checkout in your editor.
+          Version 0.4.9 improves pull request navigation and review controls.
 
-          - Enter opens an existing checkout or clones the selected repository into a missing directory, then opens the editor. Clone failures retain the form for correction and retry.
-          - Editor forms suggest nine paths, show controls in the footer, and use simpler labels. Project code-base paths suggest the repository folder even before it exists.
-          - Upgrade Ratatui to 0.30.2, Crossterm to 0.29, Reqwest to 0.13.5, and related dependencies. Keep Windows async bindings and the Linux OAuth2 HTTP client compatible with their SDKs.
-          - GitHub Actions checks run only for release tags; branch pushes and pull requests no longer run CI.
+          - Click PR detail tabs to switch between Description, Comments, Status, and Files. Settings is available in the top bar with the 4 shortcut.
+          - Changed-file diffs load automatically on first opening Files and whenever the selection changes. File navigation stays responsive during loading, and stale replies cannot replace the selected file.
+          - Merge and Approve buttons appear beside the PR detail tabs and retain their confirmation flows. Duplicate footer actions and Enter/Esc hints are removed from the PR view.
+          - Review controls adapt to narrow and wide terminals, with disabled Merge and Approve buttons for inactive PRs.
 
           Text diffs are limited to 1 MiB per side. Binary files and submodules direct you to the browser.
           Live tenant operations and local Linux/WSL integration were not retested for this patch; automated CLI and TUI tests cover these changes.

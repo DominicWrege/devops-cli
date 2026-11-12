@@ -52,6 +52,8 @@ fn review_tabs_files_and_diffs_remain_usable_at_both_widths() -> Result<()> {
         assert!(rendered.contains("Files [f]"));
         assert!(rendered.contains("first.rs"));
         assert!(rendered.contains("+new"));
+        assert!(!rendered.contains("Enter"));
+        assert!(!rendered.contains("Esc"));
         assert!(
             buffer
                 .content
@@ -94,6 +96,94 @@ fn review_tabs_files_and_diffs_remain_usable_at_both_widths() -> Result<()> {
     assert_eq!(app.pr_tab, 3);
     app.handle(key(KeyCode::Char('v')))?;
     assert!(matches!(app.confirm, Some(PrCommand::Review { id: 7, .. })));
+    Ok(())
+}
+
+#[tokio::test]
+async fn review_loads_diffs_on_selection_and_cancels_stale_reads_without_moving_focus() -> Result<()>
+{
+    let (_root, mut app) = fixture()?;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    app.tx = tx;
+    app.settings.auth = AuthMethod::Entra;
+    app.settings.tenant_id = Some("11111111-1111-1111-1111-111111111111".into());
+    app.settings.client_id = Some("22222222-2222-2222-2222-222222222222".into());
+    app.screen = Screen::Pr {
+        value: json!({"pullRequestId":7,"status":"active"}),
+    };
+    app.pr_tab = 3;
+    // Submodule diffs complete locally, without authentication or network requests.
+    app.receive((
+        app.generation,
+        Message::PrChanges {
+            id: 7,
+            changes: json!({"iteration":2,"files":[
+                {"item":{"path":"/first","gitObjectType":"commit"}},
+                {"item":{"path":"/second","gitObjectType":"commit"}}
+            ]}),
+        },
+    ));
+    assert!(app.task.is_some(), "{}", app.status);
+    assert_eq!(app.pane_focus, 0);
+    receive_task(&mut app, &mut rx).await?;
+    let Screen::Pr { value } = &app.screen else {
+        anyhow::bail!("Expected PR")
+    };
+    assert!(text(&value["detailChanges"]["files"][0], "diff").contains("Submodule"));
+    assert_eq!(app.pane_focus, 0);
+
+    app.handle(key(KeyCode::Down))?;
+    assert!(app.task.is_some());
+    let stale = app.generation;
+    app.handle(key(KeyCode::Up))?;
+    assert!(app.task.is_none());
+    app.receive((
+        stale,
+        Message::PrDiff {
+            id: 7,
+            index: 1,
+            diff: "stale".into(),
+        },
+    ));
+    let Screen::Pr { value } = &app.screen else {
+        anyhow::bail!("Expected PR")
+    };
+    assert_eq!(review::selected(value), 0);
+    assert!(value["detailChanges"]["files"][1]["diff"].is_null());
+
+    app.pane_x[1] = 8;
+    app.pane_y[1] = 4;
+    app.handle(key(KeyCode::Down))?;
+    assert_eq!(app.pane_x[1], 0);
+    assert_eq!(app.pane_y[1], 0);
+    assert!(app.task.is_some());
+    app.handle(key(KeyCode::Char('w')))?;
+    app.handle(key(KeyCode::Down))?;
+    receive_task(&mut app, &mut rx).await?;
+    assert_eq!(app.pane_focus, 1);
+    assert_eq!(app.pane_y[1], 1);
+    let Screen::Pr { value } = &app.screen else {
+        anyhow::bail!("Expected PR")
+    };
+    assert!(text(&value["detailChanges"]["files"][1], "diff").contains("Submodule"));
+
+    app.handle(key(KeyCode::Char('d')))?;
+    app.handle(key(KeyCode::Char('f')))?;
+    assert!(app.task.is_none());
+    assert_eq!(app.pane_focus, 0);
+    app.launch(std::future::pending());
+    app.writing = true;
+    let generation = app.generation;
+    app.handle(key(KeyCode::Up))?;
+    app.handle(key(KeyCode::Char('m')))?;
+    assert_eq!(app.generation, generation);
+    assert!(app.task.is_some());
+    assert!(app.writing);
+    assert!(app.form.is_none());
+    let Screen::Pr { value } = &app.screen else {
+        anyhow::bail!("Expected PR")
+    };
+    assert_eq!(review::selected(value), 1);
     Ok(())
 }
 

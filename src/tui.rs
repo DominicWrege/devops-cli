@@ -785,7 +785,7 @@ impl App {
             return Ok(());
         };
         if !value["detailChanges"].is_null() {
-            return Ok(());
+            return self.load_diff();
         }
         let id = response_id(value, "pullRequestId")?;
         let pr = value.clone();
@@ -809,7 +809,10 @@ impl App {
             return Ok(());
         };
         if !file["diff"].is_null() {
-            self.pane_focus = 1;
+            if self.task.is_some() {
+                self.cancel_task();
+                self.status.clear();
+            }
             return Ok(());
         }
         let id = response_id(value, "pullRequestId")?;
@@ -1070,6 +1073,13 @@ impl App {
                 {
                     value["detailChanges"] = changes;
                     value["detailChangeIndex"] = serde_json::json!(0);
+                    self.pane_x[1] = 0;
+                    self.pane_y[1] = 0;
+                    if self.pr_tab == 3
+                        && let Err(error) = self.load_diff()
+                    {
+                        self.status = error.to_string();
+                    }
                 }
             }
             Message::PrDiff { id, index, diff } => {
@@ -1078,10 +1088,6 @@ impl App {
                     && let Some(file) = value["detailChanges"]["files"].get_mut(index)
                 {
                     file["diff"] = serde_json::json!(diff);
-                    if review::selected(value) == index && self.pr_tab == 3 {
-                        self.pane_focus = 1;
-                        self.pane_y[1] = 0;
-                    }
                 }
             }
             Message::Pipelines(mut items) => {
@@ -1408,6 +1414,7 @@ impl App {
                 ))
             }
             'm' => {
+                ensure!(value["status"] == "active", "Only active PRs can be merged");
                 self.form = Some(Form::new(
                     FormKind::Merge(id),
                     vec![(
@@ -1593,7 +1600,7 @@ impl App {
         }
         if let Some(selected) = self.settings_menu {
             match key.code {
-                KeyCode::Esc | KeyCode::Char('s') => self.settings_menu = None,
+                KeyCode::Esc | KeyCode::Char('4' | 's') => self.settings_menu = None,
                 KeyCode::Down | KeyCode::Tab | KeyCode::Char('j') => {
                     self.settings_menu = Some((selected + 1) % 3);
                 }
@@ -1618,7 +1625,7 @@ impl App {
         if self.handle_repository_filter(key)? {
             return Ok(false);
         }
-        if key.code == KeyCode::Char('s')
+        if matches!(key.code, KeyCode::Char('4' | 's'))
             && !self.writing
             && !matches!(self.screen, Screen::Projects(_) | Screen::Organizations(_))
         {
@@ -1659,7 +1666,7 @@ impl App {
             self.pane_focus = (self.pane_focus + 1) % panes;
             return Ok(false);
         }
-        if matches!(self.screen, Screen::Pr { .. }) {
+        if matches!(self.screen, Screen::Pr { .. }) && !self.writing {
             if self.pr_tab == 3
                 && self.pane_focus == 0
                 && let Screen::Pr { value } = &mut self.screen
@@ -1682,8 +1689,12 @@ impl App {
                     _ => None,
                 };
                 if let Some(selected) = selected {
-                    value["detailChangeIndex"] = serde_json::json!(selected);
-                    self.pane_y[1] = 0;
+                    if selected != index {
+                        value["detailChangeIndex"] = serde_json::json!(selected);
+                        self.pane_y[1] = 0;
+                        self.pane_x[1] = 0;
+                        self.load_diff()?;
+                    }
                     return Ok(false);
                 }
             }
@@ -1734,6 +1745,11 @@ impl App {
                 }
                 KeyCode::Home => {
                     self.pane_y[self.pane_focus] = 0;
+                    return Ok(false);
+                }
+                KeyCode::Char(action @ ('m' | 'v')) if !self.writing => {
+                    self.cancel_task();
+                    self.open_pr_form(action)?;
                     return Ok(false);
                 }
                 _ => {}
@@ -1968,6 +1984,7 @@ impl App {
             }
             KeyCode::Enter if matches!(self.screen, Screen::Pr { .. }) && self.pr_tab == 3 => {
                 self.load_diff()?;
+                self.pane_focus = 1;
             }
             KeyCode::Char('r')
                 if matches!(self.screen, Screen::Pipelines(_) | Screen::Recent(_)) =>
@@ -2260,6 +2277,7 @@ fn render_pr(
         } else {
             regions[1].width
         },
+        pr["status"] == "active",
     );
     frame.render_widget(
         Paragraph::new(body)
@@ -2293,21 +2311,52 @@ fn section_index(screen: &Screen) -> Option<usize> {
     }
 }
 
-fn pr_tabs(tab: usize, width: u16) -> Line<'static> {
-    let labels = if width >= 60 {
-        ["Description [d]", "Comments [c]", "Status [t]", "Files [f]"]
+fn pr_tabs(tab: usize, width: u16, actions_enabled: bool) -> Line<'static> {
+    let labels = if width >= 83 {
+        [
+            "Description [d]",
+            "Comments [c]",
+            "Status [t]",
+            "Files [f]",
+            "Merge [m]",
+            "Approve [v]",
+        ]
+    } else if width >= 61 {
+        [
+            "Desc [d]",
+            "Chat [c]",
+            "State [t]",
+            "Files [f]",
+            "Merge [m]",
+            "Approve [v]",
+        ]
+    } else if width >= 46 {
+        [
+            "Desc",
+            "Chat",
+            "Status",
+            "Files",
+            "Merge [m]",
+            "Approve [v]",
+        ]
     } else {
-        ["Desc [d]", "Chat [c]", "State [t]", "Files [f]"]
+        ["Desc", "Chat", "State", "Files", "Merge", "Approve"]
     };
     let mut spans = Vec::new();
     for (index, label) in labels.into_iter().enumerate() {
         if index > 0 {
-            spans.push(Span::raw(if width >= 60 { " | " } else { " " }));
+            spans.push(Span::raw(if width >= 83 { " | " } else { " " }));
         }
         spans.push(Span::styled(
             label,
             if tab == index {
                 Style::default().fg(Color::Cyan).underlined()
+            } else if index >= 4 {
+                Style::default().fg(if actions_enabled {
+                    Color::Green
+                } else {
+                    Color::DarkGray
+                })
             } else {
                 Style::default().fg(Color::Gray)
             },
@@ -2375,12 +2424,10 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
         &["Open [Enter]", "Close [Esc]"]
     } else if app.pr_actions {
         &[
-            "Approve [v]",
             "Browser [b]",
             "Editor [o]",
             "Comment [c]",
             "Edit [e]",
-            "Merge [m]",
             "Abandon [a]",
             "Reactivate [r]",
             "New [n]",
@@ -2392,7 +2439,7 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
                 "Pipelines [1]",
                 "Pull requests [2]",
                 "Repositories [3]",
-                "Settings [s]",
+                "Settings [4]",
                 "Assigned [i]",
             ],
             Screen::Organizations(_) | Screen::Projects(_) => &["Use [Enter]", "Cancel [Esc]"],
@@ -2465,25 +2512,20 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
                 "Refresh [F5]",
             ],
             Screen::Pr { .. } if app.pr_tab == 3 => &[
-                "Diff [Enter]",
                 "Files/Diff [w]",
                 "Tabs [d/c/t/f]",
-                "Approve [v]",
                 "Browser [b]",
                 "Editor [o]",
                 "Actions [?]",
-                "Back [Esc]",
                 "Refresh [F5]",
             ],
             Screen::Pr { .. } => &[
                 "Tabs [d/c/t/f]",
                 "Files [f]",
-                "Approve [v]",
                 "Browser [b]",
                 "Editor [o]",
                 "Actions [?]",
                 "Tabs [ / ]",
-                "Back [Esc]",
                 "Refresh [F5]",
             ],
             Screen::Pipelines(_) => &[
@@ -2520,8 +2562,6 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
                     || app
                         .repository_view()
                         .is_some_and(|view| view.selected_ref().is_some()))
-                && !(!matches!(app.screen, Screen::Pr { ref value } if value["status"] == "active")
-                    && *hint == "Approve [v]")
                 && !(app.form.is_none()
                     && empty
                     && (hint.contains("[Enter]")
@@ -2547,20 +2587,10 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
         && app.help_scroll.is_none()
     {
         result.extend(
-            [
-                "Pane [w/F6]",
-                "Pan [Shift+←→]",
-                "Settings [s]",
-                "Help [h]",
-                "Quit [q]",
-            ]
-            .into_iter()
-            .filter(|s| !hints.contains(s))
-            .filter(|s| {
-                *s != "Settings [s]"
-                    || !matches!(app.screen, Screen::Projects(_) | Screen::Organizations(_))
-            })
-            .map(|s| (s.into(), !app.writing || s == "Quit [q]")),
+            ["Pane [w/F6]", "Pan [Shift+←→]", "Help [h]", "Quit [q]"]
+                .into_iter()
+                .filter(|s| !hints.contains(s))
+                .map(|s| (s.into(), !app.writing || s == "Quit [q]")),
         );
     }
     result
@@ -2722,7 +2752,16 @@ fn draw(frame: &mut Frame, app: &mut App) {
         .target(app.org.as_deref(), app.project.as_deref())
         .map(|t| format!("{} / {}", t.organization, t.project))
         .unwrap_or_else(|_| "Setup required".into());
-    draw_header(frame, layout[0], section_index(&app.screen), &context);
+    draw_header(
+        frame,
+        layout[0],
+        if app.settings_menu.is_some() {
+            Some(3)
+        } else {
+            section_index(&app.screen)
+        },
+        &context,
+    );
     draw_screen(frame, app, layout[1]);
     frame.render_widget(Paragraph::new(output::cell(&status_text)), layout[2]);
     draw_commands(frame, layout[3], &commands, expanded, expandable);
@@ -2854,7 +2893,10 @@ fn draw(frame: &mut Frame, app: &mut App) {
                 "Tags: e renames a tag; d or Delete asks to delete it.",
                 "Repository list: / filters names; Enter keeps it, Esc clears it.",
                 "PR tabs: d Description, c Comments, t Status, f Files.",
+                "PR files load diffs on selection.",
+                "PR actions: v approves; m opens the merge form.",
                 "PR comment: ? opens actions, then c adds a comment.",
+                "4 opens Settings; s also works.",
                 "Repositories: r picks a branch; m loads more commits.",
                 "Tags/branches: Enter toggles folders; arrows fold them.",
                 "Commit: Enter opens files; Enter on a file loads its diff.",
@@ -2919,7 +2961,7 @@ fn draw_screen(frame: &mut Frame, app: &mut App, area: Rect) {
             repositories::render(frame, area, app, &items);
         }
         Screen::Home => {
-            frame.render_widget(Paragraph::new("Your project is remembered between sessions.\n\n1  Pipelines         Browse runs and follow logs\n2  Pull requests     Review and manage your team's work\n3  Repositories      Browse repositories and clone URLs\ns  Settings          Current project and account\nq  Quit\n\nUse Tab to cycle pipelines, pull requests, and repositories.\nSelect a row with Up/Down or j/k; press Enter to open it.").block(pane_block("Home", true)),area);
+            frame.render_widget(Paragraph::new("Your project is remembered between sessions.\n\n1  Pipelines         Browse runs and follow logs\n2  Pull requests     Review and manage your team's work\n3  Repositories      Browse repositories and clone URLs\n4  Settings          Current project and account\nq  Quit\n\nUse Tab to cycle pipelines, pull requests, and repositories.\nSelect a row with Up/Down or j/k; press Enter to open it.").block(pane_block("Home", true)),area);
         }
         Screen::Organizations(items) => {
             let rect = popup(

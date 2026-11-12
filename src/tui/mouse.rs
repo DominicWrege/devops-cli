@@ -23,6 +23,27 @@ impl State {
         self.regions.push((area, focus, Target::Pane(focus)));
     }
 
+    fn pr_tabs(&mut self, area: Rect, focus: usize, bordered: bool, actions_enabled: bool) {
+        let mut x = area.x.saturating_add(u16::from(bordered));
+        let right = area.right().saturating_sub(u16::from(bordered));
+        for (index, span) in super::pr_tabs(0, area.width, actions_enabled)
+            .spans
+            .iter()
+            .enumerate()
+        {
+            let width = (span.width() as u16).min(right.saturating_sub(x));
+            if index % 2 == 0 && (index < 8 || actions_enabled) {
+                let key = ['d', 'c', 't', 'f', 'm', 'v'][index / 2];
+                self.regions.push((
+                    Rect::new(x, area.y, width, area.height.min(1)),
+                    focus,
+                    Target::Key(KeyCode::Char(key)),
+                ));
+            }
+            x = x.saturating_add(span.width() as u16);
+        }
+    }
+
     fn rows(
         &mut self,
         area: Rect,
@@ -61,11 +82,7 @@ pub(super) fn register(app: &mut App, header: Rect, area: Rect) {
         return;
     }
     if !matches!(app.screen, Screen::Organizations(_) | Screen::Projects(_)) {
-        let labels = if header.width >= 60 {
-            ["Pipelines [1]", "Pull requests [2]", "Repositories [3]"]
-        } else {
-            ["Pipes [1]", "PRs [2]", "Repos [3]"]
-        };
+        let labels = chrome::section_labels(header.width);
         let mut x = header.x;
         for (i, label) in labels.iter().enumerate() {
             let width = (label.len() as u16).min(header.right().saturating_sub(x));
@@ -169,6 +186,8 @@ pub(super) fn register(app: &mut App, header: Rect, area: Rect) {
                     Target::File,
                 );
                 app.mouse.pane(panes[1], 1);
+                app.mouse
+                    .pr_tabs(layout[0], 0, false, value["status"] == "active");
             } else {
                 let wide = area.width >= 90;
                 let columns =
@@ -179,10 +198,10 @@ pub(super) fn register(app: &mut App, header: Rect, area: Rect) {
                 if wide {
                     app.mouse.pane(regions[1], 0);
                 }
-                app.mouse.pane(
-                    if wide { columns[1] } else { regions[1] },
-                    usize::from(wide),
-                );
+                let detail = if wide { columns[1] } else { regions[1] };
+                app.mouse.pane(detail, usize::from(wide));
+                app.mouse
+                    .pr_tabs(detail, usize::from(wide), true, value["status"] == "active");
             }
         }
         Screen::Watch(viewer) => {
@@ -259,6 +278,9 @@ impl App {
         }
         if let Target::Key(code) = target {
             self.mouse.last_click = None;
+            if matches!(code, KeyCode::Char('1' | '2' | '3' | '4')) {
+                self.repo_filter.editing = false;
+            }
             return self.handle(Event::Key(event::KeyEvent::new(code, KeyModifiers::NONE)));
         }
         if self.task.is_some()
@@ -266,6 +288,9 @@ impl App {
                 self.screen,
                 Screen::Watch(_) | Screen::Pipelines(_) | Screen::Recent(_)
             )
+            && !(matches!(self.screen, Screen::Pr { .. })
+                && self.pr_tab == 3
+                && matches!(target, Target::File(_) | Target::Pane(_)))
         {
             return Ok(false);
         }
@@ -296,6 +321,8 @@ impl App {
                 if let Screen::Pr { value } = &mut self.screen {
                     value["detailChangeIndex"] = serde_json::json!(index);
                     self.pane_y[1] = 0;
+                    self.pane_x[1] = 0;
+                    self.load_diff()?;
                 }
             }
             Target::Run(index) => {
@@ -346,6 +373,165 @@ mod tests {
             row: point.y,
             modifiers: KeyModifiers::NONE,
         }))
+    }
+
+    #[test]
+    fn pr_tabs_actions_and_settings_are_clickable_at_narrow_and_wide_sizes() -> Result<()> {
+        for width in [50, 70, 90, 120] {
+            let (_root, mut app) = super::super::tests::fixture()?;
+            app.screen = Screen::Pr {
+                value: json!({"pullRequestId":7,"status":"active",
+                    "detailChanges":{"files":[{"item":{"path":"/one"},"diff":"+one"}]}
+                }),
+            };
+            for (label, tab) in [("Chat", 1), ("Stat", 2), ("Files", 3), ("Desc", 0)] {
+                let buffer = render(&mut app, width, 30)?;
+                mouse(
+                    &mut app,
+                    at(&buffer, label)?,
+                    MouseEventKind::Down(MouseButton::Left),
+                )?;
+                assert_eq!(app.pr_tab, tab);
+            }
+            for tab in [0, 3] {
+                app.pr_tab = tab;
+                assert!(
+                    !command_hints(&app)
+                        .iter()
+                        .any(|(hint, _)| hint == "Approve [v]" || hint == "Merge [m]")
+                );
+                let buffer = render(&mut app, width, 30)?;
+                mouse(
+                    &mut app,
+                    at(&buffer, "Merge [m]")?,
+                    MouseEventKind::Down(MouseButton::Left),
+                )?;
+                assert!(matches!(
+                    app.form.as_ref().map(|f| &f.kind),
+                    Some(FormKind::Merge(7))
+                ));
+                assert!(!app.pr_actions);
+                app.handle(Event::Key(event::KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                )))?;
+                assert!(matches!(app.confirm, Some(PrCommand::Merge { id: 7, .. })));
+                assert!(app.task.is_none());
+                app.handle(Event::Key(event::KeyEvent::new(
+                    KeyCode::Esc,
+                    KeyModifiers::NONE,
+                )))?;
+                let buffer = render(&mut app, width, 30)?;
+                mouse(
+                    &mut app,
+                    at(&buffer, "Approve [v]")?,
+                    MouseEventKind::Down(MouseButton::Left),
+                )?;
+                assert!(matches!(
+                    app.confirm,
+                    Some(PrCommand::Review {
+                        id: 7,
+                        vote: Vote::Approve
+                    })
+                ));
+                assert!(app.task.is_none());
+                app.handle(Event::Key(event::KeyEvent::new(
+                    KeyCode::Esc,
+                    KeyModifiers::NONE,
+                )))?;
+            }
+            let buffer = render(&mut app, width, 30)?;
+            mouse(
+                &mut app,
+                at(&buffer, "Settings [4]")?,
+                MouseEventKind::Down(MouseButton::Left),
+            )?;
+            assert_eq!(app.settings_menu, Some(0));
+            assert!(matches!(app.screen, Screen::Pr { .. }));
+            let buffer = render(&mut app, width, 30)?;
+            assert!(
+                buffer[(at(&buffer, "Settings [4]")?.x, 0)]
+                    .modifier
+                    .contains(Modifier::UNDERLINED)
+            );
+            app.handle(Event::Key(event::KeyEvent::new(
+                KeyCode::Char('4'),
+                KeyModifiers::NONE,
+            )))?;
+            assert!(app.settings_menu.is_none());
+            app.handle(Event::Key(event::KeyEvent::new(
+                KeyCode::Char('4'),
+                KeyModifiers::NONE,
+            )))?;
+            assert_eq!(app.settings_menu, Some(0));
+            app.settings_menu = None;
+            app.screen = Screen::Repos(vec![]);
+            app.repo_filter.editing = true;
+            app.repo_filter.query = "demo".into();
+            let buffer = render(&mut app, width, 30)?;
+            mouse(
+                &mut app,
+                at(&buffer, "Settings [4]")?,
+                MouseEventKind::Down(MouseButton::Left),
+            )?;
+            assert_eq!(app.settings_menu, Some(0));
+            assert!(!app.repo_filter.editing);
+            assert_eq!(app.repo_filter.query, "demo");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_clicks_cancel_pending_diffs_and_keep_list_focus() -> Result<()> {
+        for width in [70, 120] {
+            let (_root, mut app) = super::super::tests::fixture()?;
+            app.screen = Screen::Pr {
+                value: json!({"pullRequestId":7,"status":"active",
+                    "detailChanges":{"files":[
+                        {"item":{"path":"/one.rs"},"diff":"+one"},
+                        {"item":{"path":"/two.rs"},"diff":"+two"}
+                    ]}
+                }),
+            };
+            app.pr_tab = 3;
+            app.launch(std::future::pending());
+            let buffer = render(&mut app, width, 30)?;
+            app.pane_x[1] = 8;
+            app.pane_y[1] = 4;
+            mouse(
+                &mut app,
+                at(&buffer, "/two.rs")?,
+                MouseEventKind::Down(MouseButton::Left),
+            )?;
+            assert_eq!(app.pane_focus, 0);
+            assert_eq!(app.pane_y[1], 0);
+            assert_eq!(app.pane_x[1], 0);
+            assert!(app.task.is_none());
+            let Screen::Pr { value } = &app.screen else {
+                anyhow::bail!("Expected PR")
+            };
+            assert_eq!(review::selected(value), 1);
+            assert!(at(&render(&mut app, width, 30)?, "+two").is_ok());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn completed_prs_disable_merge_and_approve_buttons() -> Result<()> {
+        let (_root, mut app) = super::super::tests::fixture()?;
+        app.screen = Screen::Pr {
+            value: json!({"pullRequestId":7,"status":"completed"}),
+        };
+        let buffer = render(&mut app, 120, 30)?;
+        for (label, key) in [("Merge [m]", 'm'), ("Approve [v]", 'v')] {
+            let point = at(&buffer, label)?;
+            assert_eq!(buffer[(point.x, point.y)].fg, Color::DarkGray);
+            mouse(&mut app, point, MouseEventKind::Down(MouseButton::Left))?;
+            assert!(app.form.is_none());
+            assert!(app.open_pr_form(key).is_err());
+            assert!(app.confirm.is_none());
+        }
+        Ok(())
     }
 
     #[test]

@@ -9,7 +9,7 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.4.8
+mise use -g github:DominicWrege/devops-cli@0.4.9
 devops login
 ```
 
@@ -75,7 +75,7 @@ devops tui
 The TUI remembers your selected organization and project and opens directly to
 pull requests on subsequent launches. If you are signed in but have no selected
 project, it opens the project picker without asking for your token again.
-Press `s` in the workspace for Settings, then choose Current project or Account.
+Press `4` in the workspace for Settings, then choose Current project or Account.
 Settings also has a Code base path for the current organization and project.
 Set it to the folder containing your local repositories. Path fields show matching
 folders as you type or paste. Use Up/Down to select a suggestion and `Tab` to
@@ -99,23 +99,27 @@ pane or dialog; `.` expands it, and `h` opens scrollable keyboard help.
 | `3` | Repositories |
 | `Tab` / `Shift+Tab` | Cycle pipelines, pull requests, and repositories outside forms |
 | `i` | Toggle assigned reviews needing attention from the PR list; open them from home |
-| `s` | Settings over the workspace: current project and account |
+| `4` or `s` | Settings over the workspace: current project and account |
 | Up/Down, `Enter` | Select and open an item |
 | `w` or `F6` | Focus another visible pane |
 | `PageUp` / `PageDown` | Move through the focused list or scroll the focused pane |
 | Left/Right | Focus the list or detail pane |
 | Shift+Left/Right | Pan long lines and table cells |
 | `F7` / `F8` or `[` / `]` | Previous / next tab in PR details |
-| `d` / `c` / `t` / `f` | PR Description / Comments / Status / Files; Enter on a file opens its diff |
+| `d` / `c` / `t` / `f` | PR Description / Comments / Status / Files; selecting a file loads its diff |
+| `m` | Open the merge form in PR details |
 | `b` / `o` | Open the selected repository or PR in the browser / its local checkout in an editor |
 | `.` / `h` | Expand commands / open keyboard help |
 | `F5` | Refresh lists and details |
 | `Esc` | Cancel a pending read, close a form, or leave the current view |
 | `q` | Quit outside forms |
 
-Mouse support is enabled in the TUI. Click the top section tabs to switch views,
-click list rows to select them, and double-click to open them. Click a pane to
-focus it; the mouse wheel navigates the list or scrolls the pane under the pointer.
+Mouse support is enabled in the TUI. Click the top section tabs to switch views
+or open Settings. Click list rows to select them, and double-click to open them.
+Click a pane to focus it; the mouse wheel navigates the list or scrolls the pane
+under the pointer.
+PR detail tabs and the Merge and Approve buttons are clickable; selecting a changed file
+loads its diff.
 In the pipeline viewer, clicking a task pauses automatic task selection, and
 scrolling logs pauses following. Forms, settings, and confirmation dialogs use
 the keyboard.
@@ -144,16 +148,17 @@ compact header. Press `d` for Description, `c` for Comments, `t` for Status, or 
 for Files. `[` / `]` and `F7` / `F8` also cycle detail tabs. Use `w` or `F6` to change pane
 focus, and Up/Down or `PgUp`/`PgDn` to scroll. `Esc` returns to the PR list.
 
-Press `f` for changed files. Select a file with Up/Down, then press `Enter` to load
-its unified diff. Additions are green and deletions red. `w` or `F6` switches
-between files and the diff; scroll with Up/Down or `PgUp`/`PgDn` and pan long diff
+Press `f` for changed files. The first file's unified diff loads automatically;
+select another file with Up/Down or a click to load its diff. Additions are green
+and deletions red. `w` or `F6` switches between files and the diff; scroll with
+Up/Down or `PgUp`/`PgDn` and pan long diff
 lines with Shift+Left/Right. Narrow terminals stack the file list above the diff.
 Files compare the latest PR iteration with its merge base. Diffs use that
 iteration's fixed commits and are cached until `F5` refreshes the PR. Binary
 files, submodules, and text over 1 MiB per side show a message directing you to
 the browser. No local checkout is needed for the TUI diff.
 
-In PR details, press `v` to approve or `?` to open the actions menu for commenting, editing, merging, abandoning, reactivating, or creating a PR. The existing action shortcuts still work. To approve an assigned review, press `i` in the PR list, open the PR with `Enter`, then press `v`. Approval, merge, and abandon ask for confirmation. Press `n` in the PR list or details to create a PR.
+In PR details, click Merge or press `m` to choose a merge strategy, click Approve or press `v` to approve, or `?` to open the actions menu for commenting, editing, merging, abandoning, reactivating, or creating a PR. Merge and Approve appear beside the detail tabs. The existing action shortcuts still work. To approve an assigned review, press `i` in the PR list, open the PR with `Enter`, then press `v`. Approval, merge, and abandon ask for confirmation. Press `n` in the PR list or details to create a PR.
 
 To add a comment from PR details, press `?`, then `c`. The direct `c` key opens
 the Comments tab.

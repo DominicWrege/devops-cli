@@ -25,9 +25,9 @@ pub(super) fn render(
         ))
     } else {
         Text::from(vec![
-            pr_tabs(3, area.width),
+            pr_tabs(3, area.width, pr["status"] == "active"),
             Line::raw(format!(
-                "PR #{} · Iteration {} · Enter: diff · w: files/diff",
+                "PR #{} · Iteration {}",
                 scalar(&pr["pullRequestId"]),
                 scalar(&changes["iteration"])
             )),
@@ -43,7 +43,7 @@ pub(super) fn render(
     let index = selected(pr);
     if rows.is_empty() {
         let message = if changes.is_null() {
-            "Files not loaded. Press d to load, or F5 to refresh."
+            "Loading changed files. Press F5 to retry."
         } else {
             "No changed files."
         };
@@ -73,7 +73,14 @@ pub(super) fn render(
         let mut state = ListState::default().with_selected(Some(index));
         frame.render_stateful_widget(
             List::new(items)
-                .block(pane_block("Changed files · Enter: diff", focus == 0))
+                .block(pane_block(
+                    if pr["detailLabel"].is_string() {
+                        "Changed files · Enter: diff"
+                    } else {
+                        "Changed files"
+                    },
+                    focus == 0,
+                ))
                 .highlight_style(selection_style())
                 .highlight_symbol("› "),
             panes[0],
@@ -83,7 +90,13 @@ pub(super) fn render(
     let file = rows.get(index);
     let diff = file
         .and_then(|v| v["diff"].as_str())
-        .unwrap_or("Select a file and press Enter to load its diff.");
+        .unwrap_or(if pr["detailLabel"].is_string() {
+            "Select a file and press Enter to load its diff."
+        } else if file.is_some() {
+            "Loading file diff..."
+        } else {
+            "No file selected."
+        });
     let lines: Vec<Line> = output::clean(diff)
         .lines()
         .map(|line| {
