@@ -16,6 +16,17 @@ fn contents(buffer: &Buffer) -> String {
     buffer.content.iter().map(|c| c.symbol()).collect()
 }
 
+async fn receive_task(
+    app: &mut App,
+    rx: &mut mpsc::UnboundedReceiver<(u64, Message)>,
+) -> Result<()> {
+    let message = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await?
+        .context("Expected task result")?;
+    app.receive(message);
+    Ok(())
+}
+
 #[test]
 fn review_tabs_files_and_diffs_remain_usable_at_both_widths() -> Result<()> {
     let (_root, mut app) = fixture()?;
@@ -135,9 +146,13 @@ fn diff_replies_stay_with_their_pr_and_file_and_errors_leave_review_available() 
     Ok(())
 }
 
-#[test]
-fn editor_shortcut_works_for_repos_and_prs_and_keeps_invalid_path_for_retry() -> Result<()> {
-    let (_root, mut app) = fixture()?;
+#[tokio::test]
+async fn editor_shortcut_works_for_repos_and_prs_and_keeps_invalid_path_for_retry() -> Result<()> {
+    let (root, mut app) = fixture()?;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    app.tx = tx;
+    let invalid = root.path().join("not a directory");
+    std::fs::write(&invalid, "keep this")?;
     let repo = json!({"name":"demo","id":"repo"});
     let pr = json!({"pullRequestId":7,"repository":repo});
     for screen in [
@@ -155,13 +170,10 @@ fn editor_shortcut_works_for_repos_and_prs_and_keeps_invalid_path_for_retry() ->
         app.handle(key(KeyCode::Char('o')))?;
         let form = app.form.as_mut().context("Editor form")?;
         assert!(matches!(form.kind, FormKind::OpenEditor(_)));
-        form.fields[0].value = app
-            .store
-            .root
-            .join("missing-checkout")
-            .display()
-            .to_string();
-        assert!(app.submit().is_err());
+        form.fields[0].value = invalid.display().to_string();
+        app.submit()?;
+        receive_task(&mut app, &mut rx).await?;
+        assert!(app.status.contains("Local checkout must be a directory"));
         assert!(app.form.is_some());
         app.handle(key(KeyCode::Esc))?;
         assert!(app.form.is_none());
@@ -172,9 +184,11 @@ fn editor_shortcut_works_for_repos_and_prs_and_keeps_invalid_path_for_retry() ->
     Ok(())
 }
 
-#[test]
-fn editor_remembers_the_last_successful_choice_when_reopened() -> Result<()> {
+#[tokio::test]
+async fn editor_remembers_the_last_successful_choice_when_reopened() -> Result<()> {
     let (root, mut app) = fixture()?;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    app.tx = tx;
     let checkout = root.path().join("checkout with spaces");
     std::fs::create_dir(&checkout)?;
     assert!(
@@ -199,6 +213,7 @@ fn editor_remembers_the_last_successful_choice_when_reopened() -> Result<()> {
     form.fields[0].value = checkout.display().to_string();
     form.fields[1].value = executable.clone();
     app.submit()?;
+    receive_task(&mut app, &mut rx).await?;
     assert!(app.form.is_none());
     let saved = crate::external::EditorSettings::load(&app.store)?;
     assert_eq!(saved.executable, executable);
@@ -224,7 +239,10 @@ fn editor_remembers_the_last_successful_choice_when_reopened() -> Result<()> {
     // A failed launch must keep the last editor that actually opened.
     app.form.as_mut().context("Editor form")?.fields[1].value =
         "devops-missing-test-editor-9271".into();
-    assert!(app.submit().is_err());
+    app.submit()?;
+    receive_task(&mut app, &mut rx).await?;
+    assert!(app.form.is_some());
+    assert!(app.status.contains("Could not launch editor"));
     assert_eq!(
         crate::external::EditorSettings::load(&app.store)?.executable,
         executable
@@ -234,6 +252,61 @@ fn editor_remembers_the_last_successful_choice_when_reopened() -> Result<()> {
     assert_eq!(
         app.form.as_ref().context("Editor form")?.value(1)?,
         expected
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn editor_enter_clones_missing_paths_and_keeps_failed_clones_for_retry() -> Result<()> {
+    let (root, mut app) = fixture()?;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    app.tx = tx;
+    let source = root.path().join("source repo");
+    assert!(
+        std::process::Command::new("git")
+            .arg("init")
+            .arg(&source)
+            .output()?
+            .status
+            .success()
+    );
+    let destination = root.path().join("new parent").join("cloned checkout");
+    let executable = std::env::current_exe()?.display().to_string();
+    let missing_source = root.path().join("missing source").display().to_string();
+    app.form = Some(Form::new(
+        FormKind::OpenEditor(missing_source.clone()),
+        vec![
+            (
+                "Local checkout directory",
+                destination.display().to_string(),
+            ),
+            ("GUI editor executable", executable.clone()),
+        ],
+    ));
+    app.handle(key(KeyCode::Enter))?;
+    assert!(app.task.is_some());
+    assert!(app.writing);
+    // Submission stays isolated until the clone finishes.
+    app.handle(key(KeyCode::Enter))?;
+    app.handle(key(KeyCode::Esc))?;
+    assert!(app.form.is_some());
+    receive_task(&mut app, &mut rx).await?;
+    assert!(!app.writing);
+    assert!(app.status.contains("Could not clone repository"));
+    let form = app.form.as_mut().context("Retained editor form")?;
+    assert_eq!(form.value(0)?, destination.display().to_string());
+    assert_eq!(form.value(1)?, executable);
+    assert!(!app.store.root.join("editor.json").exists());
+    let source = source.display().to_string();
+    form.kind = FormKind::OpenEditor(source.clone());
+    app.handle(key(KeyCode::Enter))?;
+    receive_task(&mut app, &mut rx).await?;
+    assert!(app.form.is_none());
+    assert!(app.status.contains("Opened checkout"));
+    assert!(destination.join(".git").is_dir());
+    assert_eq!(
+        crate::external::EditorSettings::load(&app.store)?.checkouts[&source].canonicalize()?,
+        destination.canonicalize()?
     );
     Ok(())
 }
@@ -256,6 +329,10 @@ fn editor_paths_suggest_inline_complete_and_keep_fields_separate() -> Result<()>
         let rendered = contents(&render(&mut app, width, 25)?);
         assert!(rendered.contains("demo checkout/"));
         assert!(!rendered.contains("F2"));
+        assert!(rendered.contains("Open/clone [Enter/Ctrl+S]"));
+        assert!(!rendered.contains("no arguments"));
+        assert!(!rendered.contains("Type a path"));
+        assert!(!rendered.contains("Select [↑↓]"));
     }
     app.handle(key(KeyCode::Tab))?;
     let form = app.form.as_ref().context("Form")?;
@@ -363,14 +440,14 @@ fn project_code_base_setting_persists_and_seeds_editor_paths_without_replacing_s
     );
     app.handle(key(KeyCode::Esc))?;
 
-    // PRs use the same project base; repositories without a matching folder start at the base.
+    // PRs suggest a repository folder even when it still needs to be cloned.
     app.screen = Screen::Pr {
         value: json!({"pullRequestId":7,"repository":{"name":"other"}}),
     };
     app.handle(key(KeyCode::Char('o')))?;
     assert_eq!(
         app.form.as_ref().context("Editor form")?.value(0)?,
-        base.display().to_string()
+        base.join("other").display().to_string()
     );
     app.handle(key(KeyCode::Esc))?;
     let saved = root.path().join("saved checkout");

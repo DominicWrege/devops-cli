@@ -1,8 +1,7 @@
 [package]
 name = "devops"
-version = "0.4.7"
+version = "0.4.8"
 edition = "2024"
-rust-version = "1.88"
 description = "Azure DevOps CLI and TUI"
 
 [dependencies]
@@ -12,30 +11,31 @@ azure_core = { version = "1.1", default-features = false, features = ["reqwest",
 azure_identity = { version = "1", default-features = false, features = ["tokio"] }
 azure_devops_rust_api = { version = "0.39.1", default-features = false, features = ["git", "build", "pipelines", "core", "accounts", "profile", "policy"] }
 clap = { version = "4", features = ["derive"] }
-crossterm = "0.28"
-dirs = "6"
+crossterm = "0.29"
+dirs = "7"
 fs2 = "0.4"
 oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
-ratatui = "0.29"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+ratatui = "0.30"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 time = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 uuid = "1"
-base64 = "0.22"
+base64 = "0.23"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 percent-encoding = "2"
-tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", features = ["sink"] }
 cli-table = { version = "0.5", default-features = false }
-similar = "2.7"
-open = "5.3"
+similar = "3.2"
+open = "5.4"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Foundation", "Foundation_Collections", "Security_Authentication_Web_Core", "Security_Credentials", "Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Com", "Win32_System_WinRT", "Win32_UI_WindowsAndMessaging", "Win32_System_Console"] }
-windows-future = "0.3"
+# Match the WinRT types used by windows 0.62.
+windows-future = "0.3.2"
 
 [dev-dependencies]
 assert_cmd = "2"

@@ -2,6 +2,23 @@
 
 No live Azure DevOps writes have been run by the implementation session. Use an explicitly approved disposable repository, PR, and pipeline for these checks.
 
+## 0.4.8 verification
+
+Local Windows checks cover 162 passing Rust tests (one credential-dependent test
+ignored), formatting, Clippy, five release-packaging tests, and a release build.
+Clone regression tests use local repositories and cover missing parent folders,
+paths with spaces, preserving existing work, and retrying a failed clone without
+saving editor settings. Editor rendering checks cover narrow and wide layouts.
+
+Dependencies now include Ratatui 0.30.2, Crossterm 0.29, and Reqwest 0.13.5.
+Windows async bindings remain aligned with the Windows SDK; Linux device login
+uses OAuth2's compatible Reqwest client. Builds use the current stable Rust toolchain.
+
+GitHub Actions checks run only for release tags, including native Windows and
+static Linux builds, packaging, and installation of the published archives.
+Live tenant cloning, authentication, and Linux/WSL desktop integration were not
+retested for this patch.
+
 ## 0.4.7 verification
 
 Local Windows checks cover 159 passing Rust tests (one credential-dependent test

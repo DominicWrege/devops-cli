@@ -131,6 +131,7 @@ enum Message {
         name: String,
         folder: String,
     },
+    EditorOpened(std::path::PathBuf),
     Written(String),
     Error(String),
 }
@@ -539,7 +540,7 @@ impl App {
             self.picker_return = Some(SavedView {
                 screen: std::mem::replace(&mut self.screen, Screen::Home),
                 run_list: self.run_list.take(),
-                selection: self.selection.clone(),
+                selection: self.selection,
                 focus: self.pane_focus,
                 detail_scroll: self.detail_scroll,
                 tab: self.pr_tab,
@@ -864,11 +865,7 @@ impl App {
                             matches!(components.next(), Some(std::path::Component::Normal(_)))
                                 && components.next().is_none();
                         let candidate = base.join(name);
-                        if safe && candidate.is_dir() {
-                            candidate
-                        } else {
-                            base.to_owned()
-                        }
+                        if safe { candidate } else { base.to_owned() }
                     })
                 })
                 .unwrap_or(std::env::current_dir()?);
@@ -876,10 +873,7 @@ impl App {
                 FormKind::OpenEditor(repo_url),
                 vec![
                     ("Local checkout directory", path.display().to_string()),
-                    (
-                        "GUI editor executable (no arguments)",
-                        settings.executable(),
-                    ),
+                    ("GUI editor executable", settings.executable()),
                 ],
             ));
             self.status.clear();
@@ -1146,6 +1140,13 @@ impl App {
                 }
                 self.status = format!("Saved pipeline {name}");
             }
+            Message::EditorOpened(root) => {
+                self.form = None;
+                self.status = format!(
+                    "Opened checkout {} in editor (current branch)",
+                    root.display()
+                );
+            }
             Message::Written(message) => {
                 self.form = None;
                 self.pr_cache = None;
@@ -1199,17 +1200,22 @@ impl App {
             } else {
                 file_browser::expand_path(executable).display().to_string()
             };
-            let root = crate::external::open_editor(
-                &self.store,
-                repo_key,
-                &file_browser::expand_path(form.value(0)?),
-                &executable,
-            )?;
-            self.form = None;
-            self.status = format!(
-                "Opened checkout {} in editor (current branch)",
-                root.display()
+            ensure!(
+                !executable.trim().is_empty(),
+                "Enter an editor executable name or full path"
             );
+            let path = file_browser::expand_path(form.value(0)?);
+            let store = self.store.clone();
+            let repo_key = repo_key.clone();
+            self.launch(async move {
+                let root = tokio::task::spawn_blocking(move || {
+                    crate::external::open_editor(&store, &repo_key, &path, &executable)
+                })
+                .await??;
+                Ok(Message::EditorOpened(root))
+            });
+            self.writing = true;
+            self.loading_label = "Opening checkout (cloning if missing)";
             return Ok(());
         }
         if matches!(form.kind, FormKind::PatIdentity) {
@@ -1352,7 +1358,7 @@ impl App {
                             None
                         },
                         items: values.clone(),
-                        selection: self.selection.clone(),
+                        selection: self.selection,
                     });
                     self.set_screen(Screen::Watch(Box::new(Viewer::new(run))));
                     self.poll_at = Instant::now();
@@ -2332,7 +2338,15 @@ fn command_hints(app: &App) -> Vec<(String, bool)> {
     } else if app.confirm.is_some() || app.tag_confirm.is_some() {
         &["Confirm [y]", "Cancel [n/Esc]"]
     } else if let Some(form) = &app.form {
-        if form.browser_kind().is_some() {
+        if matches!(form.kind, FormKind::OpenEditor(_)) {
+            &[
+                "Open/clone [Enter/Ctrl+S]",
+                "Complete [Tab]",
+                "Field [Shift+Tab]",
+                "Clear [Ctrl+U]",
+                "Cancel [Esc]",
+            ]
+        } else if form.browser_kind().is_some() {
             &[
                 "Complete [Tab]",
                 "Save [Enter/Ctrl+S]",
@@ -2591,8 +2605,16 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &Form, status: &str) {
         if i == form.selected
             && let Some(completion) = &form.completion
         {
-            let start = completion.selected.saturating_sub(3);
-            for (index, path) in completion.paths.iter().enumerate().skip(start).take(5) {
+            let limit = if matches!(form.kind, FormKind::OpenEditor(_)) {
+                9
+            } else {
+                5
+            };
+            let start = completion
+                .selected
+                .saturating_sub(3)
+                .min(completion.paths.len().saturating_sub(limit));
+            for (index, path) in completion.paths.iter().enumerate().skip(start).take(limit) {
                 let label = format!(
                     "{} {}{}",
                     if index == completion.selected {
@@ -2618,16 +2640,11 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &Form, status: &str) {
     if matches!(form.kind, FormKind::PipelineEdit(_)) {
         lines.push(Line::raw("Folder: / for root, or /Team/Project."));
     }
-    if form.browser_kind().is_some() {
-        lines.push(Line::raw(
-            "Type a path · ↑↓ select · Tab completes · Shift+Tab changes field",
-        ));
-    }
     if !status.is_empty() {
         lines.push(Line::raw(output::cell(status)));
     }
     let title = match form.kind {
-        FormKind::OpenEditor(_) => "Open existing checkout in editor",
+        FormKind::OpenEditor(_) => "Open checkout in editor",
         FormKind::CodeBase(_) => "Project code base path",
         FormKind::PipelineEdit(_) => "Edit pipeline",
         FormKind::Tag(ref edit) if edit.original.is_some() => "Rename tag",

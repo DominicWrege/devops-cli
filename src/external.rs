@@ -128,6 +128,28 @@ pub fn checkout(path: &Path) -> Result<PathBuf> {
     Ok(root)
 }
 
+fn checkout_or_clone(repo_url: &str, path: &Path) -> Result<PathBuf> {
+    if !path
+        .try_exists()
+        .context("Could not check the local checkout directory")?
+    {
+        let output = command("git")
+            .args(["clone", "--"])
+            .arg(repo_url)
+            .arg(path)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stderr(Stdio::piped())
+            .output()
+            .context("Git is required to clone the repository")?;
+        ensure!(
+            output.status.success(),
+            "Could not clone repository: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    checkout(path)
+}
+
 pub fn open_editor(
     store: &Store,
     repo_key: &str,
@@ -138,8 +160,8 @@ pub fn open_editor(
         !executable.trim().is_empty(),
         "Enter an editor executable name or full path"
     );
-    let root = checkout(path)?;
     let mut settings = EditorSettings::load(store)?;
+    let root = checkout_or_clone(repo_key, path)?;
     let mut child = spawn_editor(executable, &root)
         .context("Could not launch editor. Check the executable name or full path")?;
     // Reap editor launchers without blocking the TUI or killing the editor on exit.
@@ -204,6 +226,105 @@ mod tests {
         };
         assert!(open_editor(&store, "repo", &child, "devops-missing-test-editor-9271").is_err());
         assert!(!store.root.join("editor.json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn missing_checkout_clones_repository_and_preserves_existing_work() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source repo");
+        assert!(
+            command("git")
+                .args(["init", "--initial-branch=main"])
+                .arg(&source)
+                .status()?
+                .success()
+        );
+        std::fs::write(source.join("tracked.txt"), "cloned content")?;
+        assert!(
+            command("git")
+                .arg("-C")
+                .arg(&source)
+                .args(["add", "tracked.txt"])
+                .status()?
+                .success()
+        );
+        assert!(
+            command("git")
+                .arg("-C")
+                .arg(&source)
+                .args([
+                    "-c",
+                    "user.name=Devops Test",
+                    "-c",
+                    "user.email=devops-test@example.invalid",
+                    "commit",
+                    "--no-gpg-sign",
+                    "-m",
+                    "Initial commit",
+                ])
+                .status()?
+                .success()
+        );
+        let destination = root.path().join("new parent").join("checkout & tools");
+        let checkout = checkout_or_clone(source.to_str().context("Source path")?, &destination)?;
+        assert_eq!(checkout.canonicalize()?, destination.canonicalize()?);
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("tracked.txt"))?,
+            "cloned content"
+        );
+        let branch = command("git")
+            .arg("-C")
+            .arg(&checkout)
+            .args(["branch", "--show-current"])
+            .stdout(Stdio::piped())
+            .output()?;
+        assert!(branch.status.success());
+        assert_eq!(String::from_utf8(branch.stdout)?.trim(), "main");
+        std::fs::write(checkout.join("tracked.txt"), "uncommitted work")?;
+        let subdir = checkout.join("src");
+        std::fs::create_dir(&subdir)?;
+        // An existing checkout needs no remote access or clone, including from a subdirectory.
+        assert_eq!(checkout_or_clone("missing-remote", &subdir)?, checkout);
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("tracked.txt"))?,
+            "uncommitted work"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn clone_failures_and_existing_non_checkouts_do_not_save_editor_settings() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = Store {
+            root: root.path().join("settings"),
+        };
+        let missing_source = root.path().join("missing source");
+        let destination = root.path().join("missing checkout");
+        let error = open_editor(
+            &store,
+            missing_source.to_str().context("Source path")?,
+            &destination,
+            "devops-missing-test-editor-9271",
+        )
+        .err()
+        .context("Expected clone failure")?;
+        assert!(error.to_string().contains("Could not clone repository"));
+        assert!(!destination.exists());
+        assert!(!store.root.join("editor.json").exists());
+        std::fs::create_dir(&destination)?;
+        let keep = destination.join("keep.txt");
+        std::fs::write(&keep, "keep this")?;
+        let error = checkout_or_clone("missing-remote", &destination)
+            .err()
+            .context("Expected invalid checkout")?;
+        assert!(
+            error
+                .to_string()
+                .contains("Choose an existing Git checkout")
+        );
+        assert_eq!(std::fs::read_to_string(keep)?, "keep this");
+        assert!(!destination.join(".git").exists());
         Ok(())
     }
 

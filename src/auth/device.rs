@@ -7,7 +7,7 @@ use azure_core::credentials::AccessToken;
 use fs2::FileExt;
 use oauth2::{
     ClientId, DeviceAuthorizationUrl, RefreshToken, Scope, StandardDeviceAuthorizationResponse,
-    TokenResponse, TokenUrl, basic::BasicClient,
+    TokenResponse, TokenUrl, basic::BasicClient, reqwest,
 };
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
