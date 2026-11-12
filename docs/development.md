@@ -2,7 +2,7 @@
 
 ## Build
 
-Requires Rust 1.88 or newer and a native build toolchain.
+Requires the current stable Rust toolchain and a native build toolchain.
 
 ```sh
 cargo build --locked --release
@@ -13,9 +13,12 @@ Use a native Windows build on Windows and a Linux build inside WSL. macOS is use
 
 Release targets are Windows x64 MSVC and Linux x64 musl only. ARM64 release builds have been removed.
 
-For the static Linux build, install `musl-tools` and the Rust `x86_64-unknown-linux-musl` target. CI explicitly enables `crt-static`, compiles C dependencies with `musl-gcc`, and links the executable with Rust's bundled LLD. Ubuntu's `musl-gcc` wrapper is not used for the final static-PIE link. The shared setup action checks a small executable's startup before building the application. CI checks the finished ELF for an interpreter and shared-library dependencies, then runs the binary in Alpine. Ordinary CI also checks this musl build before a tag is pushed.
+For the static Linux build, install `musl-tools` and the Rust `x86_64-unknown-linux-musl` target. The release workflow explicitly enables `crt-static`, compiles C dependencies with `musl-gcc`, and links the executable with Rust's bundled LLD. Ubuntu's `musl-gcc` wrapper is not used for the final static-PIE link. The shared setup action checks a small executable's startup before building the application. The release workflow checks the finished ELF for an interpreter and shared-library dependencies, then runs the binary in Alpine.
 
 ## Checks
+
+GitHub Actions runs automated checks only for release tags matching `v*`.
+Branch pushes and pull requests do not run CI. Run checks locally during development:
 
 ```sh
 cargo fmt --all -- --check
@@ -33,20 +36,20 @@ The Azure DevOps SDK is deprecated upstream. Small request policies repair missi
 ## Publish a release
 
 Set `package.version` in `Cargo.toml`, update `Cargo.lock`, and commit. Push the
-commit and wait for Windows, Linux musl, packaging, and Rust 1.88 CI to pass.
-Complete the live acceptance checklist before pushing a matching release tag:
+commit after running local checks. Complete the live acceptance checklist before
+pushing a matching release tag:
 
 ```sh
-git tag v0.3.6
-git push origin v0.3.6
+git tag v0.4.8
+git push origin v0.4.8
 ```
 
 `.github/workflows/release.yml` validates the tag, tests and builds on each native platform, packages the binaries, verifies SHA-256 checksums, and publishes a GitHub release. The publishing job alone has write permission. Each archive includes the WAM attribution notice. A final job installs the published release through mise on each platform.
 
-Tags such as `v0.3.6-rc.1` become prereleases. Install them with:
+Tags such as `v0.4.8-rc.1` become prereleases. Install them with:
 
 ```sh
-mise use -g 'github:DominicWrege/devops-cli[prerelease=true]@0.3.6-rc.1'
+mise use -g 'github:DominicWrege/devops-cli[prerelease=true]@0.4.8-rc.1'
 ```
 
 If publication fails after creating a draft, inspect it before retrying. The workflow does not overwrite an existing release or its assets. Passing CI does not verify live Entra sign-in.

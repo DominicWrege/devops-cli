@@ -9,7 +9,7 @@ For Azure DevOps Services, not Azure infrastructure or self-hosted Azure DevOps 
 Install a published release with [mise](https://mise.jdx.dev/):
 
 ```sh
-mise use -g github:DominicWrege/devops-cli@0.4.7
+mise use -g github:DominicWrege/devops-cli@0.4.8
 devops login
 ```
 
@@ -82,8 +82,8 @@ folders as you type or paste. Use Up/Down to select a suggestion and `Tab` to
 complete it. `Shift+Tab` changes fields; `Ctrl+U` clears the current field.
 Paths starting with `~/` expand to your home directory. To open a local checkout,
 select its repository or PR and press `o`, then enter the local checkout path.
-New editor forms start at the matching repository folder when it exists,
-or at the code base folder. Saved checkout choices take precedence. Leave the
+New editor forms suggest the repository folder under the code base, including
+folders that need to be cloned. Saved checkout choices take precedence. Leave the
 setting blank to clear it. Code base paths are saved in `settings.json`.
 The project picker opens over your current view; `Esc` restores its selection and
 scroll position. Project selection is remembered for CLI commands too.
@@ -163,13 +163,16 @@ organization and support PAT authentication. Voting requires a PAT with
 **Code: Read & write** and the corresponding repository permissions.
 
 From the PR list or details, `b` opens the PR in your default browser, where you
-can review changes and comments in Azure DevOps. `o` opens a form for an existing
-local checkout directory and a GUI editor executable. It opens that checkout's
-current branch; it does not clone, fetch, or switch to the PR branch.
+can review changes and comments in Azure DevOps. `o` opens a form for a local
+checkout directory and a GUI editor executable. If the directory is missing,
+it clones the selected repository there using Git's configured credentials,
+then opens the editor. Existing checkouts open on their current branch; new
+clones open on the repository's default branch.
 Path suggestions appear directly below the active field. Use Up/Down to select
 a match and `Tab` to complete it, or keep typing. `Shift+Tab` changes fields.
 Enter your editor's executable name or full path, without arguments.
-Press `Enter` or `Ctrl+S` to open the checkout; `Esc` cancels.
+Press `Enter` or `Ctrl+S` to open the checkout, cloning if needed; `Esc` cancels
+before submission. Clone failures keep the form open so you can correct and retry.
 
 ### Repositories
 
@@ -220,7 +223,8 @@ In Commits, Tags, and commit details, `b` opens the selected commit in the brows
 existing rows remain visible while a refresh is pending.
 
 Press `b` to open the selected repository in your default browser, or `o` to open
-an existing checkout in your editor from the repository list or Info tab.
+a checkout in your editor from the repository list or Info tab, cloning it first
+if the directory is missing.
 The editor form accepts an executable name or its full path, without command-line
 arguments or surrounding quotes. Windows batch launchers are supported, including
 names entered without `.cmd` or `.bat`. Git must be installed to resolve the

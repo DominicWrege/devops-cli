@@ -109,11 +109,12 @@ jobs:
           \`mise use -g github:$GH_REPO@$VERSION\`
 
           Start setup with \`devops login\`. Enter your organization and a personal access token at the masked prompt; no Entra app registration is required. Entra sign-in remains available with \`--entra\`.
-          Version 0.4.7 fixes Windows editor launching and new tag targets.
+          Version 0.4.8 adds automatic cloning when opening a missing checkout in your editor.
 
-          - Open in editor resolves Windows .cmd and .bat launchers from short names and full paths, including paths with spaces.
-          - The editor form restores the last successfully launched editor. Failed launch attempts keep the saved choice, and the editor-specific help line is removed.
-          - Creating a tag from Commits or Tags uses the commit selected in Commits instead of an existing tag's older target. The SHA remains editable; unloaded history requires an explicit SHA.
+          - Enter opens an existing checkout or clones the selected repository into a missing directory, then opens the editor. Clone failures retain the form for correction and retry.
+          - Editor forms suggest nine paths, show controls in the footer, and use simpler labels. Project code-base paths suggest the repository folder even before it exists.
+          - Upgrade Ratatui to 0.30.2, Crossterm to 0.29, Reqwest to 0.13.5, and related dependencies. Keep Windows async bindings and the Linux OAuth2 HTTP client compatible with their SDKs.
+          - GitHub Actions checks run only for release tags; branch pushes and pull requests no longer run CI.
 
           Text diffs are limited to 1 MiB per side. Binary files and submodules direct you to the browser.
           Live tenant operations and local Linux/WSL integration were not retested for this patch; automated CLI and TUI tests cover these changes.
